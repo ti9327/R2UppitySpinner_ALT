@@ -1082,6 +1082,31 @@ static void printSetupPage(Print& out)
               "margin-bottom:6px;text-transform:uppercase;letter-spacing:.07em'>"
               "configuration</div>");
 
+    // First-run wizard — prominently flagged when incomplete
+    {
+        bool wizIncomplete = !wizardComplete();
+        out.print("<a class='set-row' href='/wizard'");
+        if (wizIncomplete)
+            out.print(" style='background:#fef3c7;border-color:#fbbf24'");
+        out.print(">");
+        out.print("<div class='set-icon' style='background:");
+        out.print(wizIncomplete ? "#fde68a" : "#e0e7ff");
+        out.print("'><svg width='18' height='18' viewBox='0 0 18 18' fill='none' "
+                  "stroke='");
+        out.print(wizIncomplete ? "#b45309" : "#4f46e5");
+        out.print("' stroke-width='1.6' stroke-linecap='round'>"
+                  "<path d='M9 2v3M9 13v3M2 9h3M13 9h3M4 4l2 2M12 12l2 2M4 14l2-2M12 6l2-2'/>"
+                  "</svg></div>");
+        out.print("<div class='set-main'>"
+                  "<div class='set-name'>first-run wizard</div>"
+                  "<div class='set-val'>");
+        out.print(wizIncomplete ? "SETUP REQUIRED &mdash; motion blocked until complete"
+                                : "motor: ");
+        if (!wizIncomplete)
+            out.print(sMotor->fName);
+        out.print("</div></div><div class='set-arr'>&#8250;</div></a>");
+    }
+
     // Calibrate
     out.print("<a class='set-row' href='/calibrate'>");
     out.print("<div class='set-icon' style='background:#dbeafe'>"
@@ -1238,6 +1263,302 @@ static void printCalibratePage(Print& out)
               "if(e&&d.lastCmd)e.textContent=d.lastCmd;");
     out.print("}).catch(function(){});}");
     out.print("setInterval(_poll,1000);_poll();");
+    out.print("</script></body></html>");
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// FIRST-RUN WIZARD PAGE
+// Linear step-by-step bring-up flow gated by sLifterParameters.fWizardState.
+// Deliberately minimal — intended for safe 19:1 bring-up, not production polish.
+// All motion steps go through /api/wizard/* endpoints which set
+// sWizardMotionOverride so the motion gate in lifterMotorMove() allows motion.
+///////////////////////////////////////////////////////////////////////////////
+
+static void printWizardPage(Print& out)
+{
+    out.print("<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>");
+    out.print("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+    out.print("<title>R2 Setup Wizard</title><style>");
+    out.print("*{box-sizing:border-box;margin:0;padding:0}");
+    out.print("body{font-family:-apple-system,Helvetica,Arial,sans-serif;"
+              "background:#f0f2f5;color:#1a1a1a;padding:14px;max-width:600px;"
+              "margin:0 auto;padding-bottom:120px}");
+    out.print("h1{font-size:18px;margin-bottom:4px}");
+    out.print("h2{font-size:15px;margin:14px 0 8px;color:#444}");
+    out.print(".sub{color:#666;font-size:13px;margin-bottom:12px}");
+    out.print(".card{background:#fff;border:1px solid #dde1e7;border-radius:10px;"
+              "padding:14px;margin-bottom:12px}");
+    out.print(".warn{background:#fef3c7;border-color:#fbbf24;color:#78350f}");
+    out.print(".danger{background:#fee2e2;border-color:#fca5a5;color:#7f1d1d}");
+    out.print(".ok{background:#dcfce7;border-color:#86efac;color:#166534}");
+    out.print("button{appearance:none;border:1px solid #cdd1d9;background:#fff;"
+              "color:#333;border-radius:8px;padding:12px 14px;font-size:15px;"
+              "font-family:inherit;cursor:pointer;width:100%;margin:4px 0;"
+              "font-weight:500}");
+    out.print("button:disabled{opacity:.4;cursor:not-allowed}");
+    out.print("button.pri{border-color:#2563eb;background:#2563eb;color:#fff}");
+    out.print("button.dan{border-color:#dc2626;background:#dc2626;color:#fff}");
+    out.print("button.est{border:0;background:#dc2626;color:#fff;font-size:17px;"
+              "font-weight:700;padding:16px;border-radius:0;"
+              "position:fixed;bottom:0;left:0;right:0;z-index:100;"
+              "box-shadow:0 -2px 8px rgba(0,0,0,.2)}");
+    out.print("select,input[type=text]{width:100%;padding:10px;font-size:15px;"
+              "border:1px solid #cdd1d9;border-radius:8px;font-family:inherit}");
+    out.print("label{display:flex;align-items:flex-start;gap:10px;padding:8px 0;"
+              "font-size:14px;cursor:pointer}");
+    out.print("input[type=checkbox]{width:20px;height:20px;flex-shrink:0;"
+              "margin-top:1px}");
+    out.print(".sens{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;"
+              "font-size:13px;margin-top:8px}");
+    out.print(".sbox{background:#f7f8fa;padding:8px;border-radius:6px;"
+              "border:1px solid #e4e6ea}");
+    out.print(".slbl{font-size:10px;color:#888;text-transform:uppercase;"
+              "letter-spacing:.05em;font-weight:600}");
+    out.print(".sval{font-size:16px;font-weight:700;margin-top:2px}");
+    out.print(".c-g{color:#16a34a}.c-r{color:#dc2626}.c-y{color:#d97706}.c-b{color:#2563eb}");
+    out.print(".bar{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;"
+              "margin-bottom:14px}");
+    out.print(".bar div{height:6px;background:#e4e6ea;border-radius:3px}");
+    out.print(".bar div.on{background:#2563eb}");
+    out.print(".row{display:grid;grid-template-columns:1fr 1fr;gap:8px}");
+    out.print(".row4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}");
+    out.print(".log{font-family:ui-monospace,Menlo,monospace;font-size:12px;"
+              "background:#1a1a1a;color:#9ae6b4;padding:10px;border-radius:6px;"
+              "max-height:120px;overflow-y:auto;white-space:pre-wrap}");
+    out.print("</style></head><body>");
+
+    out.print("<h1>R2 First-Run Setup</h1>");
+    out.print("<div class='sub'>Walk through each step to safely bring up your lifter. "
+              "Motion is blocked until this wizard completes.</div>");
+
+    // Progress bar (7 steps: MOTOR_SELECT .. COMPLETE)
+    out.print("<div class='bar' id='bar'>");
+    for (int i = 0; i < 7; i++) out.print("<div></div>");
+    out.print("</div>");
+
+    // Live sensor strip — always visible once past motor-select
+    out.print("<div id='sensors' style='display:none'><div class='card'>");
+    out.print("<div class='slbl' style='margin-bottom:6px'>live sensors</div>");
+    out.print("<div class='sens'>");
+    out.print("<div class='sbox'><div class='slbl'>top limit</div>"
+              "<div class='sval' id='s_top'>?</div></div>");
+    out.print("<div class='sbox'><div class='slbl'>bottom limit</div>"
+              "<div class='sval' id='s_bot'>?</div></div>");
+    out.print("<div class='sbox'><div class='slbl'>rotary home</div>"
+              "<div class='sval' id='s_rot'>?</div></div>");
+    out.print("<div class='sbox'><div class='slbl'>lifter pos (ticks)</div>"
+              "<div class='sval' id='s_pos'>?</div></div>");
+    out.print("</div></div></div>");
+
+    // Main step container
+    out.print("<div id='step'></div>");
+
+    // ESTOP button (fixed bottom)
+    out.print("<button class='est' onclick='estop()'>&#9632; EMERGENCY STOP</button>");
+
+    // --- JavaScript ---
+    out.print("<script>");
+    out.print("var S={state:-1,motor:0,motorName:'',topLimit:false,botLimit:false,"
+              "rotHome:false,lifterPos:0,calibrated:false,minPower:0};");
+    out.print("var busy=false;");
+
+    out.print("function $(id){return document.getElementById(id)}");
+    out.print("function estop(){fetch('/api/estop').catch(function(){});}");
+    out.print("function api(path,cb){fetch(path).then(function(r){return r.json()})"
+              ".then(cb||function(){}).catch(function(e){alert('Request failed: '+e);});}");
+
+    // Poll status every 500ms, re-render if state changed or if we're on a sensor step
+    out.print("function poll(){fetch('/api/wizard/status').then(function(r){return r.json()})"
+              ".then(function(d){var prev=S.state;Object.assign(S,d);"
+              "updateBar();updateSensors();"
+              "if(prev!==S.state||!$('step').hasChildNodes())render();})"
+              ".catch(function(){});}");
+
+    out.print("function updateBar(){var bars=$('bar').children;"
+              "for(var i=0;i<7;i++){var idx=i+1;"  // step index 1..7 maps to states 1..7
+              "bars[i].className=(S.state>=idx)?'on':'';}}");
+
+    out.print("function updateSensors(){"
+              "var show=(S.state>=2&&S.state<7);"  // show during sensor-check .. acceptance
+              "$('sensors').style.display=show?'':'none';"
+              "if(!show)return;"
+              "function bool(el,v,okLabel,offLabel){"
+              "el.textContent=v?okLabel:offLabel;"
+              "el.className='sval '+(v?'c-g':'c-r');}"
+              "bool($('s_top'),S.topLimit,'HIT','open');"
+              "bool($('s_bot'),S.botLimit,'HIT','open');"
+              "bool($('s_rot'),S.rotHome,'HOME','away');"
+              "$('s_pos').textContent=S.lifterPos;"
+              "$('s_pos').className='sval c-b';}");
+
+    // Render function dispatches on state
+    out.print("function render(){var st=$('step');st.innerHTML='';"
+              "if(S.state<=1)renderMotorSelect(st);"
+              "else if(S.state==2)renderSensorCheck(st);"
+              "else if(S.state==3)renderCreepTest(st);"
+              "else if(S.state==4||S.state==5)renderCalibration(st);"
+              "else if(S.state==6)renderAcceptance(st);"
+              "else renderComplete(st);}");
+
+    // --- Step 1: Motor select ---
+    out.print("function renderMotorSelect(c){");
+    out.print("c.innerHTML='<h2>Step 1 of 6: Select Motor</h2>"
+              "<div class=\"card\">"
+              "<label style=\"display:block;padding:0 0 6px\">Lifter motor type:</label>"
+              "<select id=\"mt\">"
+              "<option value=\"0\">Pololu 4757 (6.3:1) &mdash; original Greg Hulette build</option>"
+              "<option value=\"1\">Pololu 4751 (19:1) &mdash; HIGH TORQUE, use extreme care</option>"
+              "<option value=\"2\">IA-Parts lifter</option>"
+              "</select></div>"
+              "<div class=\"card warn\"><strong>Before continuing, confirm:</strong>"
+              "<label><input type=\"checkbox\" id=\"c1\"> Upper frame is in good condition &mdash; "
+              "no cracks, bolts tight (19:1 torque can crack frames)</label>"
+              "<label><input type=\"checkbox\" id=\"c2\"> Both limit switches (top &amp; bottom) are wired and verified</label>"
+              "<label><input type=\"checkbox\" id=\"c3\"> Motor encoder is wired and verified</label>"
+              "<label><input type=\"checkbox\" id=\"c4\"> Lifter travel area is clear of people and obstructions</label>"
+              "<label><input type=\"checkbox\" id=\"c5\"> I have reviewed the wiring and understand the risks of high-torque operation</label>"
+              "</div>"
+              "<button class=\"pri\" id=\"go\" disabled onclick=\"setMotor()\">Apply Motor &amp; Continue</button>"
+              "<button onclick=\"skip()\">Expert mode: skip wizard</button>';");
+    out.print("$('mt').value=S.motor;");
+    out.print("var boxes=['c1','c2','c3','c4','c5'];"
+              "function upd(){var ok=boxes.every(function(id){return $(id).checked;});"
+              "$('go').disabled=!ok;}"
+              "boxes.forEach(function(id){$(id).addEventListener('change',upd);});");
+    out.print("}");
+
+    out.print("function setMotor(){if(busy)return;busy=true;"
+              "var t=parseInt($('mt').value);"
+              "api('/api/wizard/setmotor?type='+t,function(d){busy=false;"
+              "alert('Motor profile applied. Calibration cleared; wizard will continue.');"
+              "poll();});}");
+
+    out.print("function skip(){if(!confirm('Skip wizard? Only do this if you have already calibrated this build.'))return;"
+              "api('/api/wizard/skip',function(){location.reload();});}");
+
+    // --- Step 2: Sensor check (lifter-only; rotary verified during safety maneuver) ---
+    out.print("function renderSensorCheck(c){");
+    out.print("c.innerHTML='<h2>Step 2 of 6: Manual Sensor Check</h2>"
+              "<div class=\"card\">Active motor: <strong>'+S.motorName+'</strong></div>"
+              "<div class=\"card\">By hand, move the lifter carriage up and down to verify "
+              "the sensors read correctly using the live sensor panel above:"
+              "<ul style=\"margin:8px 0 0 18px;font-size:14px\">"
+              "<li>Touch the <strong>top</strong> limit switch &rarr; TOP LIMIT should flip to <span class=\"c-g\">HIT</span></li>"
+              "<li>Touch the <strong>bottom</strong> limit switch &rarr; BOTTOM LIMIT should flip to <span class=\"c-g\">HIT</span></li>"
+              "<li>The <strong>lifter position</strong> readout should change as you move the carriage (encoder working)</li>"
+              "</ul>"
+              "<div class=\"sub\" style=\"margin-top:10px\">Rotary home is not manually verified &mdash; the gearing prevents hand movement. "
+              "It will be exercised during the safety maneuver after calibration.</div></div>"
+              "<label><input type=\"checkbox\" id=\"ack\"> Both limit switches trigger correctly and the encoder counts change</label>"
+              "<button class=\"pri\" id=\"go\" disabled onclick=\"advance(3)\">Sensors verified &mdash; Continue</button>"
+              "<button onclick=\"advance(1)\">Back</button>';");
+    out.print("$('ack').addEventListener('change',function(){$('go').disabled=!$('ack').checked;});");
+    out.print("}");
+
+    out.print("function advance(to){if(busy)return;busy=true;"
+              "api('/api/wizard/advance?to='+to,function(){busy=false;poll();});}");
+
+    // --- Step 3: Creep test (low-power creep to each limit) ---
+    out.print("function renderCreepTest(c){");
+    out.print("c.innerHTML='<h2>Step 3 of 6: Low-Power Creep Test</h2>"
+              "<div class=\"card warn\"><strong>Stand clear of the lifter.</strong> "
+              "This runs the motor at 30% throttle until it hits each limit switch. "
+              "If anything looks wrong, hit EMERGENCY STOP at the bottom of the screen.</div>"
+              "<div class=\"card\">"
+              "<div style=\"margin-bottom:6px\">First, creep <strong>down</strong> to find bottom limit:</div>"
+              "<button class=\"pri\" id=\"cdn\" onclick=\"creep(\\'down\\')\">&darr; Creep Down</button>"
+              "<div id=\"rdn\" class=\"sub\" style=\"margin-top:4px\"></div>"
+              "<div style=\"margin:12px 0 6px\">Then creep <strong>up</strong> to find top limit:</div>"
+              "<button class=\"pri\" id=\"cup\" onclick=\"creep(\\'up\\')\">&uarr; Creep Up</button>"
+              "<div id=\"rup\" class=\"sub\" style=\"margin-top:4px\"></div>"
+              "</div>"
+              "<button class=\"pri\" id=\"go\" disabled onclick=\"advance(4)\">Continue to Calibration</button>"
+              "<button onclick=\"advance(2)\">Back</button>';");
+    // If we have already observed both limits during this session, enable continue.
+    // Simpler: enable after a successful both-direction result stored in local vars.
+    out.print("if(window._creepOk){$('go').disabled=false;}");
+    out.print("}");
+
+    out.print("function creep(dir){if(busy)return;busy=true;"
+              "var lbl=(dir=='down')?'rdn':'rup';"
+              "$(lbl).innerHTML='<span class=\"c-y\">Running &mdash; stand clear</span>';"
+              "fetch('/api/wizard/creep?dir='+dir).then(function(r){return r.json()})"
+              ".then(function(d){busy=false;"
+              "if(d.ok){$(lbl).innerHTML='<span class=\"c-g\">Limit reached OK</span>';"
+              "window['_creep_'+dir]=true;"
+              "if(window._creep_up&&window._creep_down){window._creepOk=true;$('go').disabled=false;}}"
+              "else{$(lbl).innerHTML='<span class=\"c-r\">FAILED (result='+d.result+') &mdash; check wiring and retry</span>';}"
+              "}).catch(function(e){busy=false;$(lbl).innerHTML='<span class=\"c-r\">Error: '+e+'</span>';});}");
+
+    // --- Step 4/5: Calibration (find-min-power + full sweep) ---
+    out.print("function renderCalibration(c){");
+    out.print("c.innerHTML='<h2>Step 4 of 6: Calibration</h2>"
+              "<div class=\"card warn\"><strong>Stand clear.</strong> Calibration runs multiple "
+              "full-travel sweeps at increasing speeds (cap 85% for 19:1, 100% for other motors). "
+              "This takes 1&ndash;3 minutes. Hit EMERGENCY STOP at any time if something is wrong.</div>"
+              "<div class=\"card\">Active motor: <strong>'+S.motorName+'</strong><br>"
+              "Calibrated: <strong id=\"cst\">'+(S.calibrated?\"yes\":\"no\")+'</strong><br>"
+              "Min power: <strong>'+S.minPower+'%</strong></div>"
+              "<button class=\"pri\" id=\"rc\" onclick=\"runCal()\">Run Full Calibration</button>"
+              "<div id=\"cres\" class=\"sub\" style=\"margin-top:6px\"></div>"
+              "<button onclick=\"advance(3)\">Back</button>';");
+    out.print("}");
+
+    out.print("function runCal(){if(busy)return;busy=true;"
+              "$('rc').disabled=true;"
+              "$('cres').innerHTML='<span class=\"c-y\">Calibrating... watch the mechanism carefully.</span>';"
+              "fetch('/api/wizard/calibrate').then(function(r){return r.json()})"
+              ".then(function(d){busy=false;$('rc').disabled=false;"
+              "if(d.ok){$('cres').innerHTML='<span class=\"c-g\">Calibration complete.</span>';poll();}"
+              "else{$('cres').innerHTML='<span class=\"c-r\">Calibration FAILED &mdash; check serial log.</span>';}"
+              "}).catch(function(e){busy=false;$('rc').disabled=false;"
+              "$('cres').innerHTML='<span class=\"c-r\">Error: '+e+'</span>';});}");
+
+    // --- Step 6: Acceptance ---
+    out.print("function renderAcceptance(c){");
+    out.print("c.innerHTML='<h2>Step 5 of 6: Acceptance Seeks</h2>"
+              "<div class=\"card\">Run a few short seeks at each quarter-travel point to confirm "
+              "the calibration feels right. If any seek behaves badly (overshoot, slam, stall) hit "
+              "EMERGENCY STOP and go Back to re-calibrate.</div>"
+              "<div class=\"row4\">"
+              "<button onclick=\"seek(0)\">0%</button>"
+              "<button onclick=\"seek(25)\">25%</button>"
+              "<button onclick=\"seek(50)\">50%</button>"
+              "<button onclick=\"seek(75)\">75%</button>"
+              "<button onclick=\"seek(100)\">100%</button>"
+              "<button onclick=\"seek(50)\">50%</button>"
+              "<button onclick=\"seek(0)\">Home</button>"
+              "<button onclick=\"seek(100)\">Full</button>"
+              "</div>"
+              "<div id=\"sres\" class=\"sub\" style=\"margin:8px 0\"></div>"
+              "<button class=\"pri\" onclick=\"accept()\">Looks good &mdash; Finish Wizard</button>"
+              "<button onclick=\"advance(4)\">Back to Calibration</button>';");
+    out.print("}");
+
+    out.print("function seek(pct){if(busy)return;busy=true;"
+              "$('sres').innerHTML='<span class=\"c-y\">Seeking to '+pct+'%...</span>';"
+              "fetch('/api/wizard/seek?pct='+pct).then(function(r){return r.json()})"
+              ".then(function(d){busy=false;"
+              "if(d.ok){$('sres').innerHTML='<span class=\"c-g\">Seek to '+pct+'% OK</span>';}"
+              "else{$('sres').innerHTML='<span class=\"c-r\">Seek to '+pct+'% FAILED</span>';}"
+              "}).catch(function(e){busy=false;$('sres').innerHTML='<span class=\"c-r\">Error: '+e+'</span>';});}");
+
+    out.print("function accept(){if(!confirm('Mark wizard complete and enable normal operation?'))return;"
+              "api('/api/wizard/accept',function(){location.href='/periscope';});}");
+
+    // --- Step 7: Complete ---
+    out.print("function renderComplete(c){");
+    out.print("c.innerHTML='<h2>Wizard Complete</h2>"
+              "<div class=\"card ok\">Setup complete. Motion is enabled. "
+              "Active motor: <strong>'+S.motorName+'</strong>.</div>"
+              "<a href=\"/periscope\"><button class=\"pri\">Go to main control</button></a>"
+              "<button class=\"dan\" onclick=\"rerun()\">Re-run wizard (clears calibration)</button>';");
+    out.print("}");
+
+    out.print("function rerun(){if(!confirm('Reset wizard and re-run setup? Existing calibration is preserved until you re-calibrate.'))return;"
+              "api('/api/wizard/reset',function(){location.reload();});}");
+
+    out.print("poll();setInterval(poll,600);");
     out.print("</script></body></html>");
 }
 
@@ -1481,6 +1802,14 @@ WPage pages[] = {
             out.println();
             printCalibratePage(out);
         }),
+    WAPI("/wizard",
+        [](Print& out, String qs) {
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:text/html");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            printWizardPage(out);
+        }),
     WPage("/marcduino",  marcduinoContents,  SizeOfArray(marcduinoContents)),
     WPage("/parameters", parametersContents, SizeOfArray(parametersContents)),
     WPage("/wifi",       wifiContents,       SizeOfArray(wifiContents)),
@@ -1666,10 +1995,14 @@ WPage pages[] = {
             out.print(",\"rssi\":"); out.print(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0);
             out.print(",\"apClients\":"); out.print(WiFi.softAPgetStationNum());
             out.print(",\"override\":");
-            if (sRescueOverrideExpiry && millis() < sRescueOverrideExpiry) {
-                out.print((sRescueOverrideExpiry - millis()) / 1000);
-            } else {
-                out.print("0");
+            {
+                uint32_t overrideExp = sRescueOverrideExpiry;  // snapshot once to avoid torn read
+                uint32_t now = millis();
+                if (overrideExp && now < overrideExp) {
+                    out.print((overrideExp - now) / 1000);
+                } else {
+                    out.print("0");
+                }
             }
             out.print(",\"lastCmd\":\"");
             for (const char* p = sCopyBuffer; *p; p++) {
@@ -1689,6 +2022,146 @@ WPage pages[] = {
             out.println("Cache-Control:no-cache");
             out.println();
             out.print(webLogBuffer.getLinesAfter(since));
+        }),
+
+    WAPI("/api/wizard/status",
+        [](Print& out, String qs) {
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"state\":"); out.print(sLifterParameters.fWizardState);
+            out.print(",\"motor\":"); out.print(sLifterParameters.fMotorType);
+            out.print(",\"motorName\":\""); out.print(sMotor->fName);
+            out.print("\",\"maxThrottle\":"); out.print(sMotor->fMaxCommandedThrottle);
+            out.print(",\"stallTimeoutMs\":"); out.print(sMotor->fStallTimeoutMs);
+            out.print(",\"topLimit\":"); out.print(lifter.lifterTopLimit() ? "true" : "false");
+            out.print(",\"botLimit\":"); out.print(lifter.lifterBottomLimit() ? "true" : "false");
+            out.print(",\"lifterPos\":"); out.print(lifter.getLifterPosition());
+            out.print(",\"rotHome\":"); out.print(lifter.rotaryHomeLimit() ? "true" : "false");
+            out.print(",\"calibrated\":"); out.print((sSettings.fUpLimitsCalibrated && sSettings.fDownLimitsCalibrated) ? "true" : "false");
+            out.print(",\"minPower\":"); out.print(sSettings.fMinimumPower);
+            out.print("}");
+        }),
+
+    // Set motor type. Body param: type=0|1|2. Triggers reboot to reinitialize cleanly.
+    WAPI("/api/wizard/setmotor",
+        [](Print& out, String qs) {
+            int idx = qs.indexOf("type=");
+            int type = (idx >= 0) ? qs.substring(idx + 5).toInt() : MOTOR_GREG_6_3_1;
+            wizardChangeMotorType(type);
+            // Advance to sensor-check step once motor is picked
+            sLifterParameters.fWizardState = WIZARD_SENSOR_CHECK;
+            sLifterParameters.save();
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":true,\"reboot\":true}");
+        }),
+
+    // Advance wizard to next step (used for checklist steps that don't involve motion).
+    // Query: ?to=N where N is the WizardState enum value.
+    WAPI("/api/wizard/advance",
+        [](Print& out, String qs) {
+            int idx = qs.indexOf("to=");
+            int to = (idx >= 0) ? qs.substring(idx + 3).toInt() : -1;
+            bool ok = (to >= WIZARD_NOT_STARTED && to <= WIZARD_COMPLETE);
+            if (ok) wizardAdvance((WizardState)to);
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print(ok ? "{\"ok\":true}" : "{\"ok\":false,\"err\":\"bad_state\"}");
+        }),
+
+    // Run low-power creep test. Query: ?dir=up|down. Blocks web server during motion.
+    WAPI("/api/wizard/creep",
+        [](Print& out, String qs) {
+            int idx = qs.indexOf("dir=");
+            String dir = (idx >= 0) ? qs.substring(idx + 4) : "";
+            int amp = dir.indexOf('&');
+            if (amp >= 0) dir = dir.substring(0, amp);
+            bool goDown = (dir == "down");
+            sWizardMotionOverride = true;
+            int result = lifter.wizardCreepToLimit(goDown);
+            sWizardMotionOverride = false;
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":"); out.print(result == 1 ? "true" : "false");
+            out.print(",\"result\":"); out.print(result);  // 1=ok, 0=stall/timeout, -1=abort
+            out.print("}");
+        }),
+
+    // Run full calibration. Blocks web server for the duration of calibration.
+    WAPI("/api/wizard/calibrate",
+        [](Print& out, String qs) {
+            sWizardMotionOverride = true;
+            bool ok = lifter.calibrate();
+            sWizardMotionOverride = false;
+            if (ok) wizardAdvance(WIZARD_ACCEPTANCE);
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print(ok ? "{\"ok\":true}" : "{\"ok\":false}");
+        }),
+
+    // Mark the wizard complete. Called after the acceptance test.
+    WAPI("/api/wizard/accept",
+        [](Print& out, String qs) {
+            wizardAdvance(WIZARD_COMPLETE);
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":true}");
+        }),
+
+    // Reset wizard back to the start. User-triggered "re-run setup" button.
+    WAPI("/api/wizard/reset",
+        [](Print& out, String qs) {
+            wizardReset();
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":true}");
+        }),
+
+    // Acceptance-test seek. Query: ?pct=0..100 — seeks to that % of travel at fMinimumPower.
+    // Only allowed during WIZARD_ACCEPTANCE (wizard motion override set here).
+    WAPI("/api/wizard/seek",
+        [](Print& out, String qs) {
+            int idx = qs.indexOf("pct=");
+            int pct = (idx >= 0) ? qs.substring(idx + 4).toInt() : -1;
+            bool ok = false;
+            if (pct >= 0 && pct <= 100 && sLifterParameters.fWizardState == WIZARD_ACCEPTANCE)
+            {
+                sWizardMotionOverride = true;
+                float speed = max(sSettings.fMinimumPower, 30u) / 100.0f;
+                ok = lifter.seekToPosition(pct / 100.0f, speed);
+                sWizardMotionOverride = false;
+            }
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print(ok ? "{\"ok\":true}" : "{\"ok\":false}");
+        }),
+
+    // Expert-mode skip: jump straight to complete. Use at your own risk.
+    WAPI("/api/wizard/skip",
+        [](Print& out, String qs) {
+            Serial.println("WIZARD: SKIPPED by user (expert mode)");
+            wizardAdvance(WIZARD_COMPLETE);
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":true}");
         }),
 
     WUpload("/upload/firmware",

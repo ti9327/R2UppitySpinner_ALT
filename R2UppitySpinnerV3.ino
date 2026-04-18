@@ -99,7 +99,7 @@ inline void _debugPrintln() { Serial.println(); sDebugSuppressNewClient = false;
 // Bump this string with each release so serial, web, and #PCONFIG all show
 // which build is running.
 ///////////////////////////////////
-#define FIRMWARE_VERSION "3.3.4"
+#define FIRMWARE_VERSION "3.4.0"
 
 ///////////////////////////////////
 // CONFIGURABLE OPTIONS
@@ -147,9 +147,7 @@ inline void _debugPrintln() { Serial.println(); sDebugSuppressNewClient = false;
 #define MOVEMODE_MAX_INTERVAL               5
 
 // --- Calibration ---
-// Pause between speed levels during calibration so the motor can cool.
-// If your motor runs hot during calibration, increase this value.
-#define CALIBRATION_COOLDOWN_MS             2500
+// Pause between speed levels is motor-profile-driven (sMotor->fCalibrationCooldownMs).
 // Maximum PID-output-limit search attempts per speed level.
 // Prevents excessive motor run time when a level is borderline.
 #define CALIBRATION_MAX_TRIES               4
@@ -183,6 +181,155 @@ inline void _debugPrintln() { Serial.println(); sDebugSuppressNewClient = false;
 #define DEFAULT_ROTARY_MINIMUM_HEIGHT       DEFAULT_LIFTER_DISTANCE/2
 
 #define MOTOR_TIMEOUT                       2000  // ms before idle motors are powered off
+
+///////////////////////////////////
+// LIFTER MOTOR PROFILES
+// One table per supported motor type. All motor-sensitive tuning lives here so
+// the differences between motors are reviewable in one place. The active
+// profile is selected by sLifterParameters.fMotorType at boot via setMotorProfile().
+//
+// SAFETY: the 19:1 Pololu 4751 has ~3x the torque of the 6.3:1 Pololu 4757.
+// Greg Hulette cracked the upper frame of his lifter mechanism while calibrating
+// the 19:1 motor. The 19:1 profile enforces tighter stall detection, a hard
+// throttle ceiling of 0.75, softer approach speeds, and a lower calibration
+// sweep cap to prevent similar damage.
+///////////////////////////////////
+
+enum LifterMotorType
+{
+    MOTOR_GREG_6_3_1 = 0,     // Pololu 4757, 6.3:1 gearbox (original)
+    MOTOR_POLOLU_19_1 = 1,    // Pololu 4751, 19:1 gearbox (high-torque, handle with care)
+    MOTOR_IAPARTS = 2,        // IA-Parts periscope lifter
+    MOTOR_TYPE_COUNT
+};
+
+struct LifterMotorProfile
+{
+    const char* fName;                  // Display name for UI
+
+    // Default tuning (applied to sLifterParameters defaults on first boot with this motor)
+    int fDefaultMinPower;               // Throttle % floor for lifting
+    int fDefaultSeekBotPower;           // Throttle % floor for lowering
+    int fDefaultLifterDistance;         // Encoder ticks per full travel (calibration overrides)
+
+    // Hard safety caps (always enforced regardless of user settings)
+    float fMaxCommandedThrottle;        // Clamp on any speed command (0.0 - 1.0)
+    int fCalibrationMaxSweepPct;        // Max speed tested during calibration sweep
+
+    // Stall detection
+    uint32_t fStallTimeoutMs;           // No-position-change abort threshold
+    int fSlowProgressMinTicksPerSec;    // Below this rate = borderline stall
+    uint32_t fSlowProgressMaxMs;        // Abort after this long of slow progress
+
+    // Pulsed drive (3ms/1ms on the 6.3:1; longer on 19:1 to match slower shaft RPM)
+    uint8_t fPulseOnMs;
+    uint8_t fPulseOffMs;
+
+    // Breakaway boost (initial burst to overcome static friction)
+    uint32_t fBreakawayMaxMs;           // Max burst duration before giving up
+    int fBreakawayRampTicksCap;         // Max ticks in the ramp-to-pulsed phase
+
+    // Calibration
+    uint32_t fCalibrationCooldownMs;    // Pause between speed levels (higher torque = more heat)
+
+    // First post-boot motion (safety maneuver)
+    float fSafetyManeuverSpeed;         // Lower = safer for first-motion validation
+
+    // Soft top-of-travel approach (ramp throttle down over last N% of travel)
+    bool fSoftApproachEnabled;          // true for high-torque motors to reduce limit impact
+    int fSoftApproachPct;               // Ramp zone as % of total travel (e.g., 15)
+};
+
+// ---- Pololu 4757, 6.3:1 (original Greg Hulette build; baseline behavior) ----
+static const LifterMotorProfile kProfileGreg6p3 = {
+    "Pololu 4757 (6.3:1, original)",
+    /* fDefaultMinPower            */ 65,
+    /* fDefaultSeekBotPower        */ 40,
+    /* fDefaultLifterDistance      */ 450,
+    /* fMaxCommandedThrottle       */ 1.0f,
+    /* fCalibrationMaxSweepPct     */ 100,
+    /* fStallTimeoutMs             */ 2000,
+    /* fSlowProgressMinTicksPerSec */ 10,
+    /* fSlowProgressMaxMs          */ 3000,
+    /* fPulseOnMs                  */ 3,
+    /* fPulseOffMs                 */ 1,
+    /* fBreakawayMaxMs             */ 500,
+    /* fBreakawayRampTicksCap      */ 80,
+    /* fCalibrationCooldownMs      */ 2500,
+    /* fSafetyManeuverSpeed        */ 0.8f,
+    /* fSoftApproachEnabled        */ false,
+    /* fSoftApproachPct            */ 0,
+};
+
+// ---- Pololu 4751, 19:1 (HIGH TORQUE — frame damage risk) ----
+// 3x gear reduction vs 6.3:1: 3x more torque, 1/3 output RPM, 3x more encoder ticks per revolution.
+// Tuning rationale:
+//   - Throttle capped at 0.75: Greg's frame cracked at higher powers. No user command can exceed this.
+//   - Stall timeout 700ms (vs 2000): at this torque, 2s of straining damages the frame.
+//   - Slow-progress threshold scaled ~3x (25 ticks/s) to match higher CPR at output.
+//   - Breakaway maxMs halved: high torque means "stuck at 250ms" = genuinely stuck, not sticky.
+//   - Pulse 5/2 (vs 3/1): compensates for slower output RPM and gives self-locking lead screw
+//     more time to settle between pulses.
+//   - Calibration sweep capped at 85%: never auto-test the top of the torque range.
+//   - Calibration cooldown 4000ms: higher stall current heats motor faster.
+//   - Safety maneuver speed 0.6 (vs 0.8): first post-boot motion is highest risk.
+//   - Soft approach enabled: ramp throttle down over last 15% of travel to soften top-of-travel impact.
+static const LifterMotorProfile kProfilePololu19 = {
+    "Pololu 4751 (19:1, high-torque)",
+    /* fDefaultMinPower            */ 45,
+    /* fDefaultSeekBotPower        */ 30,
+    /* fDefaultLifterDistance      */ 1350,  // ~3x of 6.3:1 baseline; calibration will refine
+    /* fMaxCommandedThrottle       */ 0.75f,
+    /* fCalibrationMaxSweepPct     */ 85,
+    /* fStallTimeoutMs             */ 700,
+    /* fSlowProgressMinTicksPerSec */ 25,
+    /* fSlowProgressMaxMs          */ 1500,
+    /* fPulseOnMs                  */ 5,
+    /* fPulseOffMs                 */ 2,
+    /* fBreakawayMaxMs             */ 250,
+    /* fBreakawayRampTicksCap      */ 40,
+    /* fCalibrationCooldownMs      */ 4000,
+    /* fSafetyManeuverSpeed        */ 0.6f,
+    /* fSoftApproachEnabled        */ true,
+    /* fSoftApproachPct            */ 15,
+};
+
+// ---- IA-Parts periscope lifter (legacy, third-party) ----
+static const LifterMotorProfile kProfileIAParts = {
+    "IA-Parts",
+    /* fDefaultMinPower            */ 30,
+    /* fDefaultSeekBotPower        */ 30,
+    /* fDefaultLifterDistance      */ 845,
+    /* fMaxCommandedThrottle       */ 1.0f,
+    /* fCalibrationMaxSweepPct     */ 100,
+    /* fStallTimeoutMs             */ 2000,
+    /* fSlowProgressMinTicksPerSec */ 10,
+    /* fSlowProgressMaxMs          */ 3000,
+    /* fPulseOnMs                  */ 3,
+    /* fPulseOffMs                 */ 1,
+    /* fBreakawayMaxMs             */ 500,
+    /* fBreakawayRampTicksCap      */ 80,
+    /* fCalibrationCooldownMs      */ 2500,
+    /* fSafetyManeuverSpeed        */ 0.8f,
+    /* fSoftApproachEnabled        */ false,
+    /* fSoftApproachPct            */ 0,
+};
+
+// Active profile — set by setMotorProfile() at boot and on motor-type change.
+// Defaults to the 6.3:1 profile so behavior matches the original codebase until
+// the user explicitly selects a different motor.
+static const LifterMotorProfile* sMotor = &kProfileGreg6p3;
+
+static const LifterMotorProfile* motorProfileFor(int motorType)
+{
+    switch (motorType)
+    {
+        case MOTOR_POLOLU_19_1: return &kProfilePololu19;
+        case MOTOR_IAPARTS:     return &kProfileIAParts;
+        case MOTOR_GREG_6_3_1:
+        default:                return &kProfileGreg6p3;
+    }
+}
 
 // Internal PID constants — you should not need to change these.
 #define OUTPUT_LIMIT_PRESCALE               3.1
@@ -242,6 +389,8 @@ inline void _debugPrintln() { Serial.println(); sDebugSuppressNewClient = false;
 #define PREFERENCES_PARAM_ROTARY_ENCODER_COUNT   "rotenccount"
 #define PREFERENCES_PARAM_DRIFT_CORRECTION_PCT  "driftpct"
 #define DEFAULT_DRIFT_CORRECTION_PCT            5   // re-seek if drifted more than 5%
+#define PREFERENCES_PARAM_MOTOR_TYPE             "motortype"
+#define PREFERENCES_PARAM_WIZARD_STATE           "wizstate"
 
 ///////////////////////////////////
 
@@ -500,6 +649,21 @@ StatusLED statusLED(kStatusColors, SizeOfArray(kStatusColors));
 // Stored in flash; updated by the calibration routine or web UI.
 ///////////////////////////////////
 
+// First-run wizard state machine. The wizard gates motor motion on new installs
+// and after a motor-type change, forcing the builder through a safe bring-up
+// sequence. See handleWizard() for step definitions.
+enum WizardState
+{
+    WIZARD_NOT_STARTED = 0,
+    WIZARD_MOTOR_SELECT,        // Step 1: acknowledge motor type and safety warnings
+    WIZARD_SENSOR_CHECK,        // Step 2: manual lifter sensor verification
+    WIZARD_CREEP_TEST,          // Step 3: low-power creep to each limit
+    WIZARD_FIND_MIN_POWER,      // Step 4: find minimum power
+    WIZARD_CALIBRATION,         // Step 5: full calibration sweep
+    WIZARD_ACCEPTANCE,          // Step 6: acceptance seeks
+    WIZARD_COMPLETE             // Done; motion allowed
+};
+
 struct LifterParameters
 {
     int fLifterMinPower;        // Minimum throttle % to lift
@@ -509,6 +673,8 @@ struct LifterParameters
     int fRotaryMinHeight;       // Lifter must be above this tick count before spinning is allowed
     int fRotaryEncoderCount;    // Ticks per full 360° rotation, cached across reboots
     int fDriftCorrectionPct;    // Re-seek if lifter drifts more than this % (0 = disabled)
+    int fMotorType;             // LifterMotorType enum — selects the active LifterMotorProfile
+    int fWizardState;           // WizardState enum — tracks first-run wizard progress
 
     void load()
     {
@@ -519,6 +685,12 @@ struct LifterParameters
         fRotaryMinHeight = preferences.getInt(PREFERENCES_PARAM_ROTARY_MININUM_HEIGHT, DEFAULT_ROTARY_MINIMUM_HEIGHT);
         fRotaryEncoderCount = preferences.getInt(PREFERENCES_PARAM_ROTARY_ENCODER_COUNT, 0);
         fDriftCorrectionPct = preferences.getInt(PREFERENCES_PARAM_DRIFT_CORRECTION_PCT, DEFAULT_DRIFT_CORRECTION_PCT);
+        fMotorType = preferences.getInt(PREFERENCES_PARAM_MOTOR_TYPE, MOTOR_GREG_6_3_1);
+        // Existing installs (upgrading from pre-wizard firmware) had no wizard state
+        // but likely have working calibration — treat them as already-complete to avoid
+        // forcing a re-calibration on firmware upgrade. Fresh installs will see the
+        // no-key default of 0 (WIZARD_NOT_STARTED); we force them to the wizard elsewhere.
+        fWizardState = preferences.getInt(PREFERENCES_PARAM_WIZARD_STATE, WIZARD_NOT_STARTED);
     }
 
     void save()
@@ -530,10 +702,122 @@ struct LifterParameters
         preferences.putInt(PREFERENCES_PARAM_ROTARY_MININUM_HEIGHT, fRotaryMinHeight);
         preferences.putInt(PREFERENCES_PARAM_ROTARY_ENCODER_COUNT, fRotaryEncoderCount);
         preferences.putInt(PREFERENCES_PARAM_DRIFT_CORRECTION_PCT, fDriftCorrectionPct);
+        preferences.putInt(PREFERENCES_PARAM_MOTOR_TYPE, fMotorType);
+        preferences.putInt(PREFERENCES_PARAM_WIZARD_STATE, fWizardState);
     }
 };
 
 LifterParameters sLifterParameters;
+
+// Resolve the active motor profile from sLifterParameters.fMotorType.
+// Call after sLifterParameters.load() at boot, and whenever fMotorType changes.
+static void setMotorProfile(int motorType)
+{
+    sMotor = motorProfileFor(motorType);
+    DEBUG_PRINT("Motor profile: ");
+    DEBUG_PRINTLN(sMotor->fName);
+}
+
+// Overwrite sLifterParameters with the active profile's default tuning.
+// Called when the user switches motor types — prior per-build calibration
+// doesn't carry across motors (different torque, different min-power threshold)
+// so we reset to safe profile defaults and force a re-calibration via the wizard.
+static void applyMotorProfileDefaults()
+{
+    sLifterParameters.fLifterMinPower        = sMotor->fDefaultMinPower;
+    sLifterParameters.fLifterMinSeekBotPower = sMotor->fDefaultSeekBotPower;
+    sLifterParameters.fLifterDistance        = sMotor->fDefaultLifterDistance;
+    // fRotaryMinPower / fRotaryMinHeight are not motor-lifter-specific.
+}
+
+///////////////////////////////////
+// FIRST-RUN WIZARD
+// Gates motor motion until the builder has walked through a guided bring-up
+// sequence (see WizardState enum). Protects against mis-wired limit switches,
+// wrong motor type, and builders unfamiliar with the high-torque failure modes
+// that cracked Greg Hulette's frame during 19:1 calibration.
+///////////////////////////////////
+
+// Set to true while the wizard itself is driving motion. Other motion paths
+// (Marcduino, web UI seeks, calibration outside the wizard) respect the gate.
+static volatile bool sWizardMotionOverride = false;
+
+static bool wizardComplete()
+{
+    return sLifterParameters.fWizardState >= WIZARD_COMPLETE;
+}
+
+// Returns true if the caller is permitted to energize the lifter motor.
+// The wizard itself bypasses this via sWizardMotionOverride.
+static bool wizardAllowsMotion()
+{
+    return wizardComplete() || sWizardMotionOverride;
+}
+
+static void wizardAdvance(WizardState next)
+{
+    sLifterParameters.fWizardState = next;
+    sLifterParameters.save();
+    Serial.print("WIZARD advance -> ");
+    Serial.println((int)next);
+}
+
+static void wizardReset()
+{
+    sLifterParameters.fWizardState = WIZARD_NOT_STARTED;
+    sLifterParameters.save();
+    Serial.println("WIZARD reset");
+}
+
+// Change the active motor type. Called from the wizard or Parameters page.
+// Side effects: applies profile defaults, invalidates calibration, resets
+// the wizard state machine. Caller must reboot afterward (this function does
+// not reboot — gives the caller a chance to persist other state first).
+static void wizardChangeMotorType(int newType)
+{
+    if (newType < 0 || newType >= MOTOR_TYPE_COUNT)
+        newType = MOTOR_GREG_6_3_1;
+
+    Serial.print("WIZARD change motor type: ");
+    Serial.print(sLifterParameters.fMotorType);
+    Serial.print(" -> ");
+    Serial.println(newType);
+
+    sLifterParameters.fMotorType = newType;
+    setMotorProfile(newType);
+    applyMotorProfileDefaults();
+    sLifterParameters.fWizardState = WIZARD_NOT_STARTED;
+    sLifterParameters.save();
+
+    // Invalidate calibration — prior per-build tables are meaningless for a
+    // different motor (different ticks per travel, different min-power).
+    sSettings.fUpLimitsCalibrated = false;
+    sSettings.fDownLimitsCalibrated = false;
+    sSettings.write();
+}
+
+// Called once at boot, after sSettings.read() succeeds, to decide whether this
+// is a fresh install (wizard required) or an upgrade from pre-wizard firmware
+// (has valid calibration → treat as WIZARD_COMPLETE to avoid forcing a
+// re-calibration on firmware upgrade).
+static void initWizardStateFromBoot()
+{
+    if (sLifterParameters.fWizardState >= WIZARD_COMPLETE)
+        return;  // wizard already done, nothing to do
+
+    // Upgrade detection: pre-wizard firmware had no fWizardState key. If the
+    // existing calibration tables are valid, this is an upgrade, not a fresh
+    // install — silently promote the wizard to complete.
+    if (sSettings.fUpLimitsCalibrated && sSettings.fDownLimitsCalibrated)
+    {
+        Serial.println("WIZARD: existing calibration detected — marking complete (firmware upgrade path)");
+        sLifterParameters.fWizardState = WIZARD_COMPLETE;
+        sLifterParameters.save();
+        return;
+    }
+
+    Serial.println("WIZARD: first-run setup required — motor motion gated until complete");
+}
 
 #define LIFTER_MINIMUM_POWER        sLifterParameters.fLifterMinPower
 #define LIFTER_SEEKBOTTTOM_POWER    sLifterParameters.fLifterMinSeekBotPower
@@ -607,7 +891,8 @@ static volatile bool sWebAbort;              // set by E-STOP from core 0; check
 static volatile uint32_t sRescueOverrideExpiry;  // millis() timestamp when safety override expires (0 = off)
 
 // Encoder ticks per full 360° rotation, measured during the safety maneuver.
-static unsigned sRotaryCircleEncoderCount;
+// volatile: written on core 1 (safety maneuver), read on core 0 (web API)
+static volatile unsigned sRotaryCircleEncoderCount;
 
 ///////////////////////////////////
 // COMMAND BUFFER — incoming serial characters accumulate here until a newline
@@ -892,8 +1177,29 @@ public:
 
     static void lifterMotorMove(float throttle)
     {
+        // First-run wizard gate: block non-zero lifter commands until the wizard
+        // is complete. The wizard itself bypasses this flag while running its own
+        // motion steps (sWizardMotionOverride = true). lifterMotorStop() and
+        // lifterMotorBrake() write PWM directly so "stop" is always allowed even
+        // with the gate engaged.
+        if (throttle != 0 && !wizardAllowsMotion())
+        {
+            static uint32_t sLastWizardBlockMs = 0;
+            if (millis() - sLastWizardBlockMs > 2000)
+            {
+                Serial.println("LIFTER BLOCKED: first-run wizard incomplete");
+                sLastWizardBlockMs = millis();
+            }
+            return;
+        }
+
         bool reverse = (throttle < 0);
-        throttle = min(max(abs(throttle), 0.0f), 1.0f);
+        // Clamp commanded throttle to the active motor profile's hard ceiling.
+        // This is the single chokepoint every speed command passes through, so a
+        // cap here protects the mechanism regardless of where the command came from
+        // (web UI slider, Marcduino :PP command, seek loops, calibration).
+        float ceiling = sMotor->fMaxCommandedThrottle;
+        throttle = min(max(abs(throttle), 0.0f), ceiling);
 
         if (throttle < 0.10)
             throttle = 0;
@@ -950,19 +1256,24 @@ public:
     // After both phases the caller's normal pulsed drive loop takes over.
     // Returns true if movement was detected, false if timed out (probable stall).
     static bool breakawayBoost(float power, long seekDistance = 0,
-                               int burstTicks = 10, uint32_t maxMs = 500)
+                               int burstTicks = 10, uint32_t maxMs = 0)
     {
+        // maxMs == 0 means "use active motor profile value" — lets us tighten
+        // the burst timeout on high-torque motors where "stuck" == genuinely stuck.
+        if (maxMs == 0)
+            maxMs = sMotor->fBreakawayMaxMs;
         // Scale ramp to seek distance: never more than 1/3 of total travel,
-        // capped at 80 ticks.  This prevents momentum buildup that causes
-        // the motor to slam into limit switches.
+        // capped at the profile's ramp ceiling. This prevents momentum buildup
+        // that causes the motor to slam into limit switches.
         // For very short seeks (< 30 ticks), skip breakaway entirely.
         if (seekDistance > 0 && seekDistance < 30)
             return true;  // too short to need a boost
         int rampTicks;
+        long rampCap = sMotor->fBreakawayRampTicksCap;
         if (seekDistance > 0)
-            rampTicks = min(80L, seekDistance / 3);
+            rampTicks = min(rampCap, seekDistance / 3);
         else
-            rampTicks = 80;  // default for seekToTop/seekToBottom (unknown distance)
+            rampTicks = rampCap;  // default for seekToTop/seekToBottom (unknown distance)
         rampTicks = max(rampTicks, 20);  // minimum useful ramp
 
         // Only check the limit switch in the DIRECTION OF TRAVEL.
@@ -1021,13 +1332,13 @@ public:
             if (traveled >= rampTicks)
                 break;
             lifterMotorMove(power);
-            delay(3);
+            delay(sMotor->fPulseOnMs);
             if (traveled > rampTicks * 3 / 4)
             {
                 // Last 25%: introduce braking
                 lifterMotorStop();
                 if (traveled > rampTicks * 9 / 10)
-                    delay(1);  // last 10%: full 1ms off (matches normal pulse)
+                    delay(sMotor->fPulseOffMs);  // last 10%: match normal pulse-off from profile
             }
             // 0–75%: no stop — motor runs continuously in 3ms chunks
         }
@@ -1158,23 +1469,23 @@ public:
                     seekPosChangeMs = millis();
                     needsReboost = false;
                 }
-                if (millis() - seekPosChangeMs > 2000)
+                if (millis() - seekPosChangeMs > sMotor->fStallTimeoutMs)
                 {
                     Serial.print("SEEK UP ABORT: stall at pos="); Serial.println(encoder_ticks);
                     break;
                 }
-                // Slow-progress motor protection: if moving less than 10 ticks
-                // per second for 3+ seconds, the motor is borderline stalling and
-                // drawing near-stall current. Abort to prevent motor burnout.
+                // Slow-progress motor protection: thresholds come from the active motor
+                // profile — tighter on high-torque motors (19:1) to prevent frame damage
+                // during borderline stalls that draw near-stall current.
                 if (millis() - slowCheckMs > 1000)
                 {
-                    long ticksPerSec = abs(encoder_ticks - slowCheckPos) * 1000L / max(1UL, millis() - slowCheckMs);
+                    long ticksPerSec = (long)((int64_t)abs(encoder_ticks - slowCheckPos) * 1000LL / max(1UL, millis() - slowCheckMs));
                     slowCheckPos = encoder_ticks;
                     slowCheckMs = millis();
-                    if (ticksPerSec < 10 && (target_ticks - encoder_ticks) > 20)
+                    if (ticksPerSec < sMotor->fSlowProgressMinTicksPerSec && (target_ticks - encoder_ticks) > 20)
                     {
                         slowDurationMs += 1000;
-                        if (slowDurationMs >= 3000)
+                        if (slowDurationMs >= sMotor->fSlowProgressMaxMs)
                         {
                             Serial.print("SEEK UP ABORT: slow progress (");
                             Serial.print(ticksPerSec);
@@ -1210,16 +1521,27 @@ public:
                     float minThrottle = sSettings.fMinimumPower / (100.0f * speed);
                     throttle = max(throttle, minThrottle);
                 }
-                // Pulsed drive (3ms on / 1ms off) for the ENTIRE ascent at
-                // constant speed. No ramp needed: gravity is the brake on UP.
-                // Each 3ms pulse moves ~1 encoder tick. Between pulses the motor
-                // is stopped and the self-locking lead screw + gravity hold position.
-                // Overshoot when target is reached = ~1 tick (one pulse of coast).
+                // Pulsed drive (on/off timings from active motor profile) for the
+                // ENTIRE ascent. On low-torque motors (6.3:1) gravity is the brake,
+                // so constant speed is fine. On high-torque motors (19:1) where
+                // sMotor->fSoftApproachEnabled is true, the last N% of travel ramps
+                // throttle down from speed -> approachPower to soften top-limit impact.
                 {
-                    lifterMotorMove(speed);
-                    delay(3);
+                    float power = speed;
+                    if (sMotor->fSoftApproachEnabled && sMotor->fSoftApproachPct > 0)
+                    {
+                        long distToTarget = target_ticks - encoder_ticks;
+                        long rampZone = max(30L, distance * sMotor->fSoftApproachPct / 100);
+                        if (distToTarget > 0 && distToTarget <= rampZone)
+                        {
+                            float ratio = max(0.0f, (float)distToTarget / (float)rampZone);
+                            power = approachPower + ratio * (speed - approachPower);
+                        }
+                    }
+                    lifterMotorMove(power);
+                    delay(sMotor->fPulseOnMs);
                     lifterMotorStop();
-                    delay(1);
+                    delay(sMotor->fPulseOffMs);
                 }
             }
             lifterMotorStop();
@@ -1284,7 +1606,7 @@ public:
                     seekPosChangeMs = millis();
                     needsReboost = false;
                 }
-                if (millis() - seekPosChangeMs > 2000)
+                if (millis() - seekPosChangeMs > sMotor->fStallTimeoutMs)
                 {
                     Serial.print("SEEK DOWN ABORT: stall at pos="); Serial.println(encoder_ticks);
                     break;
@@ -1292,13 +1614,13 @@ public:
                 // Slow-progress motor protection (same as UP seek)
                 if (millis() - slowCheckMs > 1000)
                 {
-                    long ticksPerSec = abs(encoder_ticks - slowCheckPos) * 1000L / max(1UL, millis() - slowCheckMs);
+                    long ticksPerSec = (long)((int64_t)abs(encoder_ticks - slowCheckPos) * 1000LL / max(1UL, millis() - slowCheckMs));
                     slowCheckPos = encoder_ticks;
                     slowCheckMs = millis();
-                    if (ticksPerSec < 10 && (encoder_ticks - target_ticks) > 20)
+                    if (ticksPerSec < sMotor->fSlowProgressMinTicksPerSec && (encoder_ticks - target_ticks) > 20)
                     {
                         slowDurationMs += 1000;
-                        if (slowDurationMs >= 3000)
+                        if (slowDurationMs >= sMotor->fSlowProgressMaxMs)
                         {
                             Serial.print("SEEK DOWN ABORT: slow progress (");
                             Serial.print(ticksPerSec);
@@ -1345,9 +1667,9 @@ public:
                         power = approachPower + ratio * (speed - approachPower);
                     }
                     lifterMotorMove(-power);
-                    delay(3);
+                    delay(sMotor->fPulseOnMs);
                     lifterMotorStop();
-                    delay(1);
+                    delay(sMotor->fPulseOffMs);
                 }
             }
             lifterMotorStop();
@@ -1739,9 +2061,9 @@ public:
             while (millis() < backoffEnd && rotaryHomeLimit() && !sWebAbort)
             {
                 rotaryMotorMove(backoffSpeed);
-                delay(3);
+                delay(sMotor->fPulseOnMs);
                 rotaryMotorStop();
-                delay(1);
+                delay(sMotor->fPulseOffMs);
             }
             rotaryMotorStop();
             if (sWebAbort) return;
@@ -1796,11 +2118,18 @@ public:
             {
                 if (rotaryHomeLimit())
                     goto home;
+                if (sWebAbort)
+                {
+                    rotaryMotorStop();
+                    return;  // ESTOP: bail immediately, skip active brake
+                }
             }
             rotaryMotorStop();
             startMillis = millis();
-            while (millis() < startMillis + 1 && !rotaryHomeLimit())
+            while (millis() < startMillis + 1 && !rotaryHomeLimit() && !sWebAbort)
                 ;
+            if (sWebAbort)
+                return;
             if (!rotaryStatus.isMoving())
             {
                 DEBUG_PRINTLN("ABORT");
@@ -2048,9 +2377,9 @@ public:
                 if (botLimit || serialAbort())
                     break;
                 lifterMotorMove(-mpower);
-                delay(3);
+                delay(sMotor->fPulseOnMs);
                 lifterMotorStop();
-                delay(1);
+                delay(sMotor->fPulseOffMs);
 
                 long curPos = getLifterPosition();
                 if (curPos != prevPos)
@@ -2058,7 +2387,7 @@ public:
                     prevPos = curPos;
                     posChangeMs = millis();
                 }
-                if (millis() - posChangeMs > 2000)
+                if (millis() - posChangeMs > sMotor->fStallTimeoutMs)
                 {
                     Serial.print("SEEK TO BOTTOM ABORT: stall at pos=");
                     Serial.println(curPos);
@@ -2148,9 +2477,9 @@ public:
                 if (Serial.available())
                     break;
                 lifterMotorMove(mpower);
-                delay(3);
+                delay(sMotor->fPulseOnMs);
                 lifterMotorStop();
-                delay(1);
+                delay(sMotor->fPulseOffMs);
                 if (!lifterStatus.isMoving())
                 {
                     Serial.println("ABORT");
@@ -2248,7 +2577,7 @@ public:
         // updateDistance=false: safety maneuver runs with dome on where EMI
         // corrupts encoder counts. Only #PSC calibration (dome off) should
         // update fLifterDistance.
-        if (seekToTop(0.8, false, false))
+        if (seekToTop(sMotor->fSafetyManeuverSpeed, false, false))
         {
         #ifndef DISABLE_SAFETY_MANEUVER
             if (!sSettings.fDisableRotary)
@@ -2401,6 +2730,13 @@ public:
     // Runs the safety maneuver if it hasn't succeeded yet. Disables motors on failure.
     static bool ensureSafetyManeuver()
     {
+        // Wizard gate: don't try to move on boot if first-run setup hasn't been completed.
+        // The wizard will run the safety maneuver itself as part of its final acceptance step.
+        if (!wizardAllowsMotion())
+        {
+            Serial.println("ENSURE SAFETY: blocked — first-run wizard incomplete");
+            return false;
+        }
         if (!sSafetyManeuver)
         {
             Serial.print("ENSURE SAFETY: running maneuver (safetyFail=");
@@ -2419,6 +2755,68 @@ public:
             }
         }
         return sSafetyManeuver;
+    }
+
+    // Low-power creep test used by the first-run wizard (Step 3).
+    // Drives the lifter at a deliberately low speed (30% of profile ceiling) toward
+    // the requested limit switch. Tight stall detection (500ms) aborts on any bind.
+    // Caller must set sWizardMotionOverride before calling and clear it afterward.
+    //
+    // goDown: true = seek bottom limit, false = seek top limit
+    // Returns: 1 = reached limit OK, 0 = stalled, -1 = aborted (ESTOP or serial)
+    static int wizardCreepToLimit(bool goDown)
+    {
+        Serial.print("WIZARD CREEP ");
+        Serial.println(goDown ? "DOWN" : "UP");
+        // Use 30% of the motor profile's ceiling — intentionally weak so a wrong
+        // limit switch or mechanical bind produces noise, not frame damage.
+        float creepSpeed = 0.30f * sMotor->fMaxCommandedThrottle;
+        if (goDown) creepSpeed = -creepSpeed;
+
+        long seekPrevPos = getLifterPosition();
+        uint32_t seekPosChangeMs = millis();
+        uint32_t totalMs = millis();
+        const uint32_t CREEP_STALL_MS = 500;       // tighter than seek: any bind = abort
+        const uint32_t CREEP_MAX_MS = 30000;       // absolute ceiling, 30s
+
+        for (;;)
+        {
+            bool limit = goDown ? lifterBottomLimit() : lifterTopLimit();
+            if (limit)
+            {
+                lifterMotorStop();
+                Serial.println("WIZARD CREEP: limit reached");
+                return 1;
+            }
+            if (serialAbort())
+            {
+                lifterMotorStop();
+                Serial.println("WIZARD CREEP: aborted");
+                return -1;
+            }
+            if (millis() - totalMs > CREEP_MAX_MS)
+            {
+                lifterMotorStop();
+                Serial.println("WIZARD CREEP: timeout (no limit hit within 30s)");
+                return 0;
+            }
+            long cur = getLifterPosition();
+            if (cur != seekPrevPos)
+            {
+                seekPrevPos = cur;
+                seekPosChangeMs = millis();
+            }
+            if (millis() - seekPosChangeMs > CREEP_STALL_MS)
+            {
+                lifterMotorStop();
+                Serial.print("WIZARD CREEP: stall at pos="); Serial.println(cur);
+                return 0;
+            }
+            lifterMotorMove(creepSpeed);
+            delay(sMotor->fPulseOnMs);
+            lifterMotorStop();
+            delay(sMotor->fPulseOffMs);
+        }
     }
 
     // Calibration routine: lifts and lowers at each 5% speed step to measure PID braking limits.
@@ -2465,7 +2863,7 @@ public:
 
         long homePosition = getLifterPosition();
         int topSpeed = LIFTER_MINIMUM_POWER;
-        for (topSpeed = LIFTER_MINIMUM_POWER; topSpeed <= 100; topSpeed += 5)
+        for (topSpeed = LIFTER_MINIMUM_POWER; topSpeed <= sMotor->fCalibrationMaxSweepPct; topSpeed += 5)
         {
             LifterStatus lifterStatus;
             lifterMotorMove(topSpeed / 100.0);
@@ -2484,7 +2882,7 @@ public:
         long targetDistance = sSettings.getLifterDistance();
 
         Serial.println("SEEK TO TOP");
-        for (; sCalibrating && topSpeed <= 100; topSpeed += 5)
+        for (; sCalibrating && topSpeed <= sMotor->fCalibrationMaxSweepPct; topSpeed += 5)
         {
             unsigned tries = 0;
             if (!isRotaryAtRest())
@@ -2525,7 +2923,7 @@ public:
                     if (topLimit || encoder_ticks >= targetDistance || serialAbort())
                         break;
                     if (encoder_ticks != calPrevPos) { calPrevPos = encoder_ticks; calPosChangeMs = millis(); }
-                    if (millis() - calPosChangeMs > 2000)
+                    if (millis() - calPosChangeMs > sMotor->fStallTimeoutMs)
                     {
                         Serial.println("ABORT");
                         break;
@@ -2594,7 +2992,7 @@ public:
             }
             // Pause between speed levels to let the motor cool down.
             lifterMotorStop();
-            delay(CALIBRATION_COOLDOWN_MS);
+            delay(sMotor->fCalibrationCooldownMs);
             if (!sCalibrating || serialAbort())
             {
                 Serial.println("SERIAL ABORT");
@@ -2640,7 +3038,7 @@ public:
         }
         delay(500);
 
-        for (topSpeed = sSettings.fMinimumPower; sCalibrating && topSpeed <= 100; topSpeed += 5)
+        for (topSpeed = sSettings.fMinimumPower; sCalibrating && topSpeed <= sMotor->fCalibrationMaxSweepPct; topSpeed += 5)
         {
             float limit;
             if (!getUpOutputLimit(topSpeed/100.0f, limit))
@@ -2651,7 +3049,7 @@ public:
             {
                 downTries++;
                 long minEncoderVal = 0x7FFFFFFFL;
-                if (!seekToTop(0.8, false))
+                if (!seekToTop(sMotor->fSafetyManeuverSpeed, false))
                 {
                     Serial.println("SEEK TO TOP FAILED - ABORT");
                     topSpeed = 200;
@@ -2675,7 +3073,7 @@ public:
                     if (botLimit || serialAbort())
                         break;
                     if (encoder_ticks != calPrevPos) { calPrevPos = encoder_ticks; calPosChangeMs = millis(); }
-                    if (millis() - calPosChangeMs > 2000)
+                    if (millis() - calPosChangeMs > sMotor->fStallTimeoutMs)
                     {
                         Serial.println("ABORT");
                         break;
@@ -2739,7 +3137,7 @@ public:
             }
             // Pause between speed levels to let the motor cool down.
             lifterMotorStop();
-            delay(CALIBRATION_COOLDOWN_MS);
+            delay(sMotor->fCalibrationCooldownMs);
             if (!sCalibrating || serialAbort())
             {
                 Serial.println("SERIAL ABORT");
@@ -3228,15 +3626,15 @@ public:
                     break;
                 long cur = getLifterPosition();
                 if (cur != seekPrevPos) { seekPrevPos = cur; seekPosChangeMs = millis(); }
-                if (millis() - seekPosChangeMs > 2000)
+                if (millis() - seekPosChangeMs > sMotor->fStallTimeoutMs)
                 {
                     Serial.print("ABORT fault="); Serial.println(lifterMotorFault());
                     break;
                 }
                 lifterMotorMove(mpower);
-                delay(3);
+                delay(sMotor->fPulseOnMs);
                 lifterMotorStop();
-                delay(1);
+                delay(sMotor->fPulseOffMs);
             }
             if (topLimit)
             {
@@ -3316,7 +3714,7 @@ public:
             if (topLimit || serialAbort())
                 break;
             if (encoder_ticks != seekPrevPos2) { seekPrevPos2 = encoder_ticks; seekPosChangeMs2 = millis(); }
-            if (millis() - seekPosChangeMs2 > 2000)
+            if (millis() - seekPosChangeMs2 > sMotor->fStallTimeoutMs)
             {
                 printf("LIFTER ABORTED AT %ld (POWER=%f)\n", encoder_ticks, steering.getThrottle() * speed);
                 break;
@@ -3378,13 +3776,13 @@ public:
                     seekPrevPos = encoder_ticks;
                     seekPosChangeMs = millis();
                 }
-                if (millis() - seekPosChangeMs > 2000)
+                if (millis() - seekPosChangeMs > sMotor->fStallTimeoutMs)
                 {
                     DEBUG_PRINTLN("ABORT");
                     break;
                 }
                 lifterMotorMove(mpower);
-                delay(3);
+                delay(sMotor->fPulseOnMs);
                 lifterMotorStop();
                 delay(2);
             }
@@ -3411,15 +3809,15 @@ public:
                     seekPrevPos = encoder_ticks;
                     seekPosChangeMs = millis();
                 }
-                if (millis() - seekPosChangeMs > 2000)
+                if (millis() - seekPosChangeMs > sMotor->fStallTimeoutMs)
                 {
                     DEBUG_PRINTLN("ABORT");
                     break;
                 }
                 lifterMotorMove(-mpower);
-                delay(3);
+                delay(sMotor->fPulseOnMs);
                 lifterMotorStop();
-                delay(1);
+                delay(sMotor->fPulseOffMs);
             }
             success = botLimit || reachedTarget;
         }
@@ -4023,7 +4421,6 @@ bool processLifterCommand(const char* cmd)
                 }
                 lifter.rotateHome();
                 lifter.setLightShow(lifter.kLightKit_Off);
-                lifter.rotateHome();
                 if (isdigit(*cmd))
                 {
                     speed = min(max(strtolu(cmd, &cmd), (uint32_t)sSettings.fMinimumPower), (uint32_t)100);
@@ -4103,6 +4500,7 @@ void processConfigureCommand(const char* cmd)
         sSettings.clearCommands();
         preferences.clear();
         sLifterParameters.load();
+        setMotorProfile(sLifterParameters.fMotorType);
         Serial.println("Cleared");
         reboot();
     }
@@ -4253,6 +4651,41 @@ void processConfigureCommand(const char* cmd)
         }
     }
 #endif
+    else if (startswith(cmd, "MOTOR"))
+    {
+        // #PMOTOR           - print current motor type
+        // #PMOTOR<n>        - set motor type (0=Greg 6.3:1, 1=Pololu 19:1, 2=IA-Parts)
+        // Changing motor type invalidates calibration and resets the first-run wizard.
+        if (isdigit(*cmd))
+        {
+            uint32_t motorType = strtolu(cmd, &cmd);
+            if (motorType >= MOTOR_TYPE_COUNT)
+            {
+                Serial.println(F("Invalid. Valid: 0=Greg 6.3:1, 1=Pololu 19:1, 2=IA-Parts"));
+            }
+            else if ((int)motorType == sLifterParameters.fMotorType)
+            {
+                Serial.print(F("Motor unchanged: "));
+                Serial.println(sMotor->fName);
+            }
+            else
+            {
+                lifter.lifterMotorStop();
+                wizardChangeMotorType((int)motorType);
+                Serial.print(F("Motor changed to: "));
+                Serial.println(sMotor->fName);
+                Serial.println(F("Calibration invalidated. Run first-run wizard before use."));
+            }
+        }
+        else
+        {
+            Serial.print(F("Motor: "));
+            Serial.print(sLifterParameters.fMotorType);
+            Serial.print(F(" ("));
+            Serial.print(sMotor->fName);
+            Serial.println(F(")"));
+        }
+    }
     else if (startswith(cmd, "STATUS"))
     {
     #ifdef USE_WIFI
@@ -4279,6 +4712,10 @@ void processConfigureCommand(const char* cmd)
     else if (startswith(cmd, "CONFIG"))
     {
         Serial.print(F("Firmware:           ")); Serial.println(F(FIRMWARE_VERSION));
+        Serial.print(F("Motor Type:         ")); Serial.print(sLifterParameters.fMotorType);
+        Serial.print(F(" (")); Serial.print(sMotor->fName); Serial.println(F(")"));
+        Serial.print(F("Wizard State:       ")); Serial.print(sLifterParameters.fWizardState);
+        Serial.println(wizardComplete() ? F(" (complete)") : F(" (INCOMPLETE — motion blocked)"));
         Serial.print(F("ID#:                ")); Serial.println(sSettings.fID);
         Serial.print(F("Baud Rate:          ")); Serial.println(sSettings.fBaudRate);
         Serial.print(F("Rotary Disabled:    ")); Serial.println(sSettings.fDisableRotary);
@@ -4843,6 +5280,7 @@ void setup()
     }
 #endif
     sLifterParameters.load();
+    setMotorProfile(sLifterParameters.fMotorType);
     // Restore the encoder count measured during a previous safety maneuver.
     // If valid (>= 1000 ticks), the safety maneuver will skip the full-revolution
     // measurement and only need to find home once.
@@ -4878,6 +5316,11 @@ void setup()
             Serial.println(F("Readback Success"));
         }
     }
+
+    // Initialize the first-run wizard state. On firmware upgrade from a
+    // pre-wizard build with valid calibration this silently marks the wizard
+    // complete so existing users aren't forced back through setup.
+    initWizardStateFromBoot();
 
     Wire.begin();
     SetupEvent::ready();

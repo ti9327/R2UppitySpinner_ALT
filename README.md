@@ -192,6 +192,26 @@ For builders starting from scratch, the original assembly walkthroughs are still
 
 ---
 
+## Changelog
+
+### v3.4.0 — Multi-motor support + first-run wizard
+- **19:1 lifter motor support.** Added user-selectable motor type (Pololu 4757 6.3:1 / Pololu 4751 19:1 / IA-Parts). Each motor ships with its own tuned profile: throttle ceiling, stall timeout, pulse timing, calibration sweep cap, soft-approach ramp. The 19:1 profile is locked at 0.75 throttle with a 700ms stall timeout and 15% top-of-travel ramp to prevent the frame damage Greg Hulette hit during early 19:1 bring-up.
+- **First-run setup wizard** (`/wizard`). Motion is gated until the builder walks through motor select → sensor check → low-power creep test → calibration → acceptance seeks. Existing calibrated installs auto-promote on boot so firmware upgrades don't force a re-calibration.
+- **`#PMOTOR<n>` Marcduino command** to query or switch motor type. `#PCONFIG` now reports active motor profile and wizard state.
+- Stall timeouts in calibration and seek-to-bottom paths now honor the active motor profile instead of hard-coded 2000ms.
+
+### v3.3.5 — Code-review fixes
+- Fixed duplicate `rotateHome()` call causing the rotary home-spam bug.
+- `volatile`-qualified `sRotaryCircleEncoderCount` to protect the cross-core read.
+- Widened stall-detect tick-rate math to int64 to prevent integer overflow on long-duration seeks.
+- ESTOP checks added inside rotary creep loops so `/api/estop` halts active homing sequences.
+- Snapshot `sRescueOverrideExpiry` before comparing to avoid torn cross-core reads.
+
+### v3.3.4 — Initial fork
+Baseline fork of reeltwo/R2UppitySpinnerV3. See "What's Different" above for the feature set.
+
+---
+
 ## Credits
 
 Original firmware by [reeltwo / Skelmir](https://github.com/reeltwo/R2UppitySpinnerV3). This fork is maintained by [highfalutintodd](https://github.com/highfalutintodd) with contributions from the R2 Builders Club community.
