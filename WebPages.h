@@ -81,6 +81,7 @@ static void printPageHead(Print& out, const char* title)
     // ── Grids ─────────────────────────────────────────────────────────────
     out.print(".g2{display:grid;grid-template-columns:1fr 1fr;gap:8px}");
     out.print(".g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}");
+    out.print(".g4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}");
     out.print(".g5{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}");
 
     // ── Light-kit pills ───────────────────────────────────────────────────
@@ -534,10 +535,23 @@ static void printPeriscopePage(Print& out)
     out.print("<button onclick='fetch(\"/api/action?do=homerotary\")'>&#8962; home</button>");
     out.print("</div>");
 
-    // ── Random ───────────────────────────────────────────────────────────
-    out.print("<div style='margin-top:8px'>");
+    // ── Random / auto-move mode ──────────────────────────────────────────
+    // Top row: "random" uses the global default aggressiveness (Parameters page).
+    // Bottom row: explicit overrides for one run + stop.
+    out.print("<div class='sec'>random</div>");
+    out.print("<div style='margin-top:0;margin-bottom:8px'>");
     out.print("<button class='primary' style='width:100%' "
-              "onclick='cmd(\":PM\")'>&#127922; random</button>");
+              "onclick='startRandom(\"\")'>&#127922; random (default)</button>");
+    out.print("</div>");
+    out.print("<div class='g4'>");
+    out.print("<button onclick='startRandom(\"g\")' "
+              "style='font-size:13px'>gentle</button>");
+    out.print("<button onclick='startRandom(\"m\")' "
+              "style='font-size:13px'>medium</button>");
+    out.print("<button onclick='startRandom(\"a\")' "
+              "style='font-size:13px'>aggressive</button>");
+    out.print("<button class='danger' onclick='stopRandom()' "
+              "style='font-size:13px'>&#9632; stop</button>");
     out.print("</div>");
 
     // ── Light kit ─────────────────────────────────────────────────────────
@@ -591,6 +605,18 @@ static void printPeriscopePage(Print& out)
 
     out.print("function lspd(){return parseInt(document.getElementById('lspd').value);}");
     out.print("function rspd(){return parseInt(document.getElementById('rspd').value);}");
+    // Cap the lift-speed slider to the active motor's maxThrottle (e.g. 75 for the
+    // 19:1). Without this, sliding to 100 sends a seek that would clamp anyway —
+    // and on motors whose calibration sweep stops short of the slider max, the
+    // exact "100" slot used to abort with "uncalibrated speed".
+    out.print("fetch('/api/wizard/status').then(function(r){return r.json();})"
+              ".then(function(d){"
+              "var mx=Math.max(10,Math.round((d.maxThrottle||1)*100));"
+              "var s=document.getElementById('lspd');"
+              "s.max=mx;"
+              "if(parseInt(s.value)>mx){s.value=mx;"
+              "document.getElementById('lsv').textContent=mx;}"
+              "}).catch(function(){});");
     out.print("document.getElementById('lspd').oninput=function(){"
               "document.getElementById('lsv').textContent=this.value;};");
     out.print("document.getElementById('rspd').oninput=function(){"
@@ -749,6 +775,14 @@ static void printPeriscopePage(Print& out)
               "var s=document.getElementById('sq'+n);"
               "if(s)s.className='sq on';"
               "cmd(':PS'+n);}");
+
+    // Random / auto-move mode
+    // Empty level => use stored Parameters default; "g"/"m"/"a" override for one run.
+    out.print("function startRandom(lv){"
+              "var u='/api/movemode'+(lv?'?level='+lv:'');"
+              "fetch(u).catch(function(){});}");
+    out.print("function stopRandom(){"
+              "fetch('/api/movemode?stop=1').catch(function(){});}");
 
     // Status poll — updates status bar, syncs rotary dial from board, updates chips
     out.print("function _poll(){fetch('/api/status')"
@@ -1229,6 +1263,39 @@ static void printCalibratePage(Print& out)
     printPageHead(out, "R2 Calibrate");
     printStatusBar(out);
     out.print("<div id='page'>");
+
+    // Motor type selector — lets users pick the motor without going through the wizard.
+    out.print("<div class='sec'>motor type</div>");
+    out.print("<div class='card' style='margin-bottom:14px'>");
+    out.print("<div style='font-size:15px;color:#333;margin-bottom:10px'>"
+              "Active: <strong id='motorname'>...</strong></div>");
+    out.print("<select id='mottype' onchange='setMotor(this.value)' "
+              "style='width:100%;padding:10px;font-size:15px;"
+              "border:1px solid #cdd1d9;border-radius:8px;background:#fff'>");
+    out.print("<option value='0'>Pololu 4757 (6.3:1, original)</option>");
+    out.print("<option value='1'>Pololu 4751 (19:1, high-torque)</option>");
+    out.print("<option value='2'>IA-Parts</option>");
+    out.print("</select>");
+    out.print("<p style='font-size:13px;color:#888;margin-top:10px;line-height:1.5'>"
+              "Changing motor type loads that motor's tuning profile and clears any "
+              "existing calibration. Bypasses the first-run wizard.</p>");
+    out.print("</div>");
+
+    // Direction-invert toggle — swaps motor PWM polarity and encoder direction
+    // together so the firmware's "up" matches physical "up" if the motor is
+    // wired backwards.
+    out.print("<div class='sec'>lifter direction</div>");
+    out.print("<div class='card' style='margin-bottom:14px'>");
+    out.print("<div style='font-size:15px;color:#333;margin-bottom:10px'>"
+              "Direction: <strong id='dirstate'>...</strong></div>");
+    out.print("<button id='dirbtn' class='primary' style='font-size:15px;padding:14px;width:100%' "
+              "onclick='toggleInvert()'>Reverse direction</button>");
+    out.print("<p style='font-size:13px;color:#888;margin-top:10px;line-height:1.5'>"
+              "If tapping <strong>up</strong> on the periscope tab makes the lifter go "
+              "<strong>down</strong>, press this to flip the wiring polarity in firmware. "
+              "Clears existing calibration since the limit-switch ends swap.</p>");
+    out.print("</div>");
+
     out.print("<div class='sec'>calibration</div>");
     out.print("<div class='card' style='margin-bottom:14px'>");
     out.print("<p style='font-size:15px;color:#555;margin-bottom:12px;line-height:1.6'>"
@@ -1244,10 +1311,298 @@ static void printCalibratePage(Print& out)
     out.print("</div></div>");
     printTabBar(out, "setup");
     out.print("<script>");
+    out.print("function loadMotor(){fetch('/api/wizard/status')"
+              ".then(function(r){return r.json();})"
+              ".then(function(d){"
+              "document.getElementById('mottype').value=d.motor;"
+              "document.getElementById('motorname').textContent=d.motorName;"
+              "var ds=document.getElementById('dirstate');"
+              "if(ds)ds.textContent=d.inverted?'Reversed (inverted)':'Normal';"
+              "}).catch(function(){});}");
+    out.print("loadMotor();");
+    out.print("function toggleInvert(){"
+              "if(!confirm('Reverse lifter direction? Calibration will be cleared.')){return;}"
+              "document.getElementById('calmsg').textContent='Reversing direction...';"
+              "fetch('/api/wizard/status').then(function(r){return r.json();})"
+              ".then(function(d){var v=d.inverted?0:1;"
+              "return fetch('/api/setinvert?value='+v);})"
+              ".then(function(r){return r.json();})"
+              ".then(function(d){"
+              "document.getElementById('calmsg').textContent="
+              "'Direction set to '+(d.inverted?'reversed':'normal')+'. Calibration cleared — re-run calibration.';"
+              "loadMotor();"
+              "}).catch(function(){"
+              "document.getElementById('calmsg').textContent='Failed to change direction.';});}");
+    out.print("function setMotor(t){"
+              "if(!confirm('Change motor type? This loads the new profile and clears existing calibration.')){"
+              "loadMotor();return;}"
+              "document.getElementById('calmsg').textContent='Applying motor profile...';"
+              "fetch('/api/setmotor?type='+t)"
+              ".then(function(r){return r.json();})"
+              ".then(function(d){"
+              "document.getElementById('calmsg').textContent="
+              "'Motor profile applied. Calibration cleared — run calibration to set up the new motor.';"
+              "loadMotor();"
+              "}).catch(function(){"
+              "document.getElementById('calmsg').textContent='Failed to change motor type.';});}");
     out.print("function doCalibrate(){"
               "document.getElementById('calmsg').textContent="
               "'Calibration started — watch the log page for progress.';"
               "fetch('/api/cmd?c='+encodeURIComponent('#PSC')).catch(function(){});}");
+    out.print("function _sc(id,cls,txt){var e=document.getElementById(id);"
+              "if(!e)return;e.textContent=txt;e.className='sv '+cls;}");
+    out.print("function _poll(){fetch('/api/status')"
+              ".then(function(r){return r.json();})"
+              ".then(function(d){");
+    out.print("_sc('st_h','c-b',d.height+'%');");
+    out.print("var rd=Math.round(d.rotDeg||0);"
+              "_sc('st_r','c-b',rd<5||rd>355?'home':rd+'\\u00b0');");
+    out.print("_sc('st_s',d.fault?'c-r':(d.safety?'c-g':'c-y'),"
+              "d.fault?'FAULT':(d.safety?'Ready':'WAIT'));");
+    out.print("_sc('st_m',d.motors?'c-g':'c-r',d.motors?'ON':'off');");
+    out.print("var e=document.getElementById('st_c');"
+              "if(e&&d.lastCmd)e.textContent=d.lastCmd;");
+    out.print("}).catch(function(){});}");
+    out.print("setInterval(_poll,1000);_poll();");
+    out.print("</script></body></html>");
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// PARAMETERS PAGE
+// Card-styled tuning knobs for motor power thresholds, lifter distance,
+// safe-spin height, drift correction, rotary disable, and the auto-random
+// aggressiveness default. All values load from /api/params and save through
+// /api/params/save.
+///////////////////////////////////////////////////////////////////////////////
+
+static void printParametersPage(Print& out)
+{
+    printPageHead(out, "R2 Parameters");
+    printStatusBar(out);
+    out.print("<div id='page'>");
+
+    // ── Lifter / rotary power thresholds ────────────────────────────────
+    out.print("<div class='sec'>motor thresholds</div>");
+    out.print("<div class='card' style='margin-bottom:14px'>");
+    out.print("<p style='font-size:13px;color:#888;margin-bottom:12px;line-height:1.5'>"
+              "Minimum throttle percentages — the lowest PWM that still moves each "
+              "motor. Calibration sets these automatically; tweak only if you know why.</p>");
+
+    // Min lifter power
+    out.print("<div style='display:flex;align-items:center;gap:10px;margin-bottom:10px'>");
+    out.print("<span style='flex:1;font-size:14px;color:#444'>Min lifter power</span>");
+    out.print("<input type='number' id='lftminpwr' min='0' max='100' "
+              "style='width:80px;padding:8px;font-size:14px;text-align:right;"
+              "border:1px solid #cdd1d9;border-radius:6px'>");
+    out.print("<span style='font-size:13px;color:#888'>%</span>");
+    out.print("</div>");
+
+    // Min seek-bottom power
+    out.print("<div style='display:flex;align-items:center;gap:10px;margin-bottom:10px'>");
+    out.print("<span style='flex:1;font-size:14px;color:#444'>Min seek-bottom power</span>");
+    out.print("<input type='number' id='lftseekbotpwr' min='0' max='100' "
+              "style='width:80px;padding:8px;font-size:14px;text-align:right;"
+              "border:1px solid #cdd1d9;border-radius:6px'>");
+    out.print("<span style='font-size:13px;color:#888'>%</span>");
+    out.print("</div>");
+
+    // Min rotary power
+    out.print("<div style='display:flex;align-items:center;gap:10px;margin-bottom:10px'>");
+    out.print("<span style='flex:1;font-size:14px;color:#444'>Min rotary power</span>");
+    out.print("<input type='number' id='rotminpwr' min='0' max='100' "
+              "style='width:80px;padding:8px;font-size:14px;text-align:right;"
+              "border:1px solid #cdd1d9;border-radius:6px'>");
+    out.print("<span style='font-size:13px;color:#888'>%</span>");
+    out.print("</div>");
+
+    // Lifter distance
+    out.print("<div style='display:flex;align-items:center;gap:10px'>");
+    out.print("<span style='flex:1;font-size:14px;color:#444'>Lifter distance</span>");
+    out.print("<input type='number' id='lftdist' min='0' "
+              "style='width:80px;padding:8px;font-size:14px;text-align:right;"
+              "border:1px solid #cdd1d9;border-radius:6px'>");
+    out.print("<span style='font-size:13px;color:#888'>ticks</span>");
+    out.print("</div>");
+    out.print("</div>");
+
+    // ── Safe spin height ─────────────────────────────────────────────────
+    out.print("<div class='sec'>safe spin height</div>");
+    out.print("<div class='card' style='margin-bottom:14px'>");
+    out.print("<p style='font-size:13px;color:#888;margin-bottom:12px;line-height:1.5'>"
+              "The lifter must be above this height before the rotary is allowed "
+              "to spin. Protects the periscope head from dome interference.</p>");
+    out.print("<div style='display:flex;align-items:center;gap:10px;margin-bottom:10px'>");
+    out.print("<input type='range' id='minsafeheight' min='0' max='100' "
+              "value='50' step='1' style='flex:1'>");
+    out.print("<span style='font-size:15px;color:#2563eb;min-width:48px;"
+              "text-align:right;font-weight:700'>"
+              "<span id='minsafeheight_v'>50</span>%</span>");
+    out.print("</div>");
+    out.print("<button class='primary' style='width:100%;padding:12px;font-size:14px' "
+              "onclick='setSafeSpinFromCurrent()'>Set to current height</button>");
+    out.print("</div>");
+
+    // ── Drift correction ─────────────────────────────────────────────────
+    out.print("<div class='sec'>drift correction</div>");
+    out.print("<div class='card' style='margin-bottom:14px'>");
+    out.print("<p style='font-size:13px;color:#888;margin-bottom:12px;line-height:1.5'>"
+              "If the lifter drifts more than this percentage from the last "
+              "commanded position while idle, re-seek it. Set to 0 to disable.</p>");
+    out.print("<div style='display:flex;align-items:center;gap:10px'>");
+    out.print("<input type='range' id='driftpct' min='0' max='20' "
+              "value='0' step='1' style='flex:1'>");
+    out.print("<span style='font-size:15px;color:#2563eb;min-width:48px;"
+              "text-align:right;font-weight:700'>"
+              "<span id='driftpct_v'>0</span>%</span>");
+    out.print("</div>");
+    out.print("</div>");
+
+    // ── Rotary disable ───────────────────────────────────────────────────
+    out.print("<div class='sec'>rotary unit</div>");
+    out.print("<div class='card' style='margin-bottom:14px'>");
+    out.print("<label style='display:flex;align-items:center;gap:10px;cursor:pointer'>");
+    out.print("<input type='checkbox' id='rotdisabled' "
+              "style='width:18px;height:18px;cursor:pointer'>");
+    out.print("<span style='flex:1;font-size:14px;color:#444'>"
+              "Disable rotary unit</span>");
+    out.print("</label>");
+    out.print("<p style='font-size:13px;color:#888;margin-top:8px;line-height:1.5'>"
+              "Periscopes without a rotary motor should disable this so the "
+              "firmware doesn't wait for a (non-existent) rotary home signal.</p>");
+    out.print("</div>");
+
+    // ── Random aggressiveness ────────────────────────────────────────────
+    out.print("<div class='sec'>random aggressiveness</div>");
+    out.print("<div class='card' style='margin-bottom:14px'>");
+    out.print("<p style='font-size:13px;color:#888;margin-bottom:12px;line-height:1.5'>"
+              "Default level for auto-random mode (bare <code>:PM</code>). Use "
+              "<code>:PMG</code>, <code>:PMM</code>, <code>:PMA</code> to override "
+              "for a single run without changing this default.</p>");
+    out.print("<select id='aggression' style='width:100%;padding:10px;font-size:15px;"
+              "border:1px solid #cdd1d9;border-radius:8px;background:#fff'>");
+    out.print("<option value='0'>Gentle &mdash; slow, deliberate, mid-range only</option>");
+    out.print("<option value='1'>Medium &mdash; balanced (recommended)</option>");
+    out.print("<option value='2'>Aggressive &mdash; fast, full-range, frequent</option>");
+    out.print("</select>");
+    out.print("<p style='font-size:12px;color:#dc2626;margin-top:10px;line-height:1.5'>"
+              "Rotary stays safe at every level &mdash; the lifter is always homed "
+              "before lowering below the safe spin height.</p>");
+    out.print("</div>");
+
+    // ── Load defaults ────────────────────────────────────────────────────
+    out.print("<div class='sec'>load defaults</div>");
+    out.print("<div class='card' style='margin-bottom:14px'>");
+    out.print("<p style='font-size:13px;color:#888;margin-bottom:12px;line-height:1.5'>"
+              "Reset all values above to factory defaults for the named motor type. "
+              "Save afterwards to persist.</p>");
+    out.print("<div style='display:flex;gap:10px'>");
+    out.print("<button onclick='loadDefaults(0)' style='flex:1;padding:12px;"
+              "font-size:14px;border:1px solid #cdd1d9;background:#fff;"
+              "border-radius:8px;cursor:pointer'>Greg 6.3:1</button>");
+    out.print("<button onclick='loadDefaults(2)' style='flex:1;padding:12px;"
+              "font-size:14px;border:1px solid #cdd1d9;background:#fff;"
+              "border-radius:8px;cursor:pointer'>IA-Parts</button>");
+    out.print("</div>");
+    out.print("</div>");
+
+    // ── Save / back ──────────────────────────────────────────────────────
+    out.print("<div style='display:flex;gap:10px;margin-bottom:14px'>");
+    out.print("<button class='primary' style='flex:2;padding:14px;font-size:15px' "
+              "onclick='saveParams()'>Save</button>");
+    out.print("<a href='/setup' style='flex:1;text-align:center;padding:14px;"
+              "font-size:15px;border:1px solid #cdd1d9;background:#fff;"
+              "border-radius:8px;text-decoration:none;color:#444'>Back</a>");
+    out.print("</div>");
+    out.print("<div id='paramsmsg' style='font-size:14px;color:#888;"
+              "text-align:center;min-height:20px'></div>");
+
+    out.print("</div>"); // #page
+    printTabBar(out, "setup");
+
+    // ── JavaScript ───────────────────────────────────────────────────────
+    out.print("<script>");
+    // Slider value-readout binding
+    out.print("function bindSlider(id){"
+              "var s=document.getElementById(id),v=document.getElementById(id+'_v');"
+              "if(!s||!v)return;"
+              "s.oninput=function(){v.textContent=s.value;};}");
+    out.print("bindSlider('minsafeheight');bindSlider('driftpct');");
+
+    // Load current values
+    out.print("function loadParams(){fetch('/api/params')"
+              ".then(function(r){return r.json();})"
+              ".then(function(d){"
+              "document.getElementById('lftminpwr').value=d.lftminpwr;"
+              "document.getElementById('lftseekbotpwr').value=d.lftseekbotpwr;"
+              "document.getElementById('rotminpwr').value=d.rotminpwr;"
+              "document.getElementById('lftdist').value=d.lftdist;"
+              "var sh=document.getElementById('minsafeheight');"
+              "sh.value=d.minsafeheight;"
+              "document.getElementById('minsafeheight_v').textContent=d.minsafeheight;"
+              "var dp=document.getElementById('driftpct');"
+              "dp.value=d.driftpct;"
+              "document.getElementById('driftpct_v').textContent=d.driftpct;"
+              "document.getElementById('rotdisabled').checked=d.rotdisabled;"
+              "document.getElementById('aggression').value=d.aggression;"
+              "}).catch(function(){"
+              "document.getElementById('paramsmsg').textContent='Failed to load parameters.';"
+              "document.getElementById('paramsmsg').style.color='#dc2626';});}");
+    out.print("loadParams();");
+
+    // Save handler
+    out.print("function saveParams(){"
+              "var qs="
+              "'lftminpwr='+document.getElementById('lftminpwr').value+"
+              "'&lftseekbotpwr='+document.getElementById('lftseekbotpwr').value+"
+              "'&rotminpwr='+document.getElementById('rotminpwr').value+"
+              "'&lftdist='+document.getElementById('lftdist').value+"
+              "'&minsafeheight='+document.getElementById('minsafeheight').value+"
+              "'&driftpct='+document.getElementById('driftpct').value+"
+              "'&rotdisabled='+(document.getElementById('rotdisabled').checked?1:0)+"
+              "'&aggression='+document.getElementById('aggression').value;"
+              "document.getElementById('paramsmsg').textContent='Saving...';"
+              "document.getElementById('paramsmsg').style.color='#888';"
+              "fetch('/api/params/save?'+qs)"
+              ".then(function(r){return r.json();})"
+              ".then(function(d){"
+              "if(d.ok){"
+              "document.getElementById('paramsmsg').textContent='Saved.';"
+              "document.getElementById('paramsmsg').style.color='#16a34a';"
+              "}else{"
+              "document.getElementById('paramsmsg').textContent='Save failed.';"
+              "document.getElementById('paramsmsg').style.color='#dc2626';}"
+              "}).catch(function(){"
+              "document.getElementById('paramsmsg').textContent='Save failed.';"
+              "document.getElementById('paramsmsg').style.color='#dc2626';});}");
+
+    // Set safe spin from current lifter height
+    out.print("function setSafeSpinFromCurrent(){"
+              "fetch('/api/params/safespin_current')"
+              ".then(function(r){return r.json();})"
+              ".then(function(d){"
+              "if(d.ok){"
+              "document.getElementById('paramsmsg').textContent="
+              "'Safe spin height set to current ('+d.pct+'%).';"
+              "document.getElementById('paramsmsg').style.color='#16a34a';"
+              "loadParams();"
+              "}else{"
+              "document.getElementById('paramsmsg').textContent='Could not set safe height.';"
+              "document.getElementById('paramsmsg').style.color='#dc2626';}"
+              "}).catch(function(){});}");
+
+    // Load defaults (0=Greg, 2=IA-Parts)
+    out.print("function loadDefaults(t){"
+              "if(!confirm('Load defaults? Unsaved changes will be lost.')){return;}"
+              "fetch('/api/params/defaults?type='+t)"
+              ".then(function(r){return r.json();})"
+              ".then(function(d){"
+              "loadParams();"
+              "document.getElementById('paramsmsg').textContent="
+              "'Defaults loaded \\u2014 Save to persist.';"
+              "document.getElementById('paramsmsg').style.color='#888';"
+              "}).catch(function(){});}");
+
+    // Status chip poller (matches other setup pages)
     out.print("function _sc(id,cls,txt){var e=document.getElementById(id);"
               "if(!e)return;e.textContent=txt;e.className='sv '+cls;}");
     out.print("function _poll(){fetch('/api/status')"
@@ -1567,13 +1922,9 @@ static void printWizardPage(Print& out)
 // These use WElement framework for form widgets but we supply custom CSS above.
 ///////////////////////////////////////////////////////////////////////////////
 
-int paramLifterMinPower;
-int paramLifterSeekBotPower;
-int paramRotaryMinPower;
-int paramLifterDistance;
-int paramMinHeight;
-int paramDriftPct;
-bool paramRotDisabled;
+// (Parameters page state previously lived here for the legacy WElement form.
+// The page is now hand-rendered by printParametersPage() and saves directly
+// via the /api/params/* endpoints — no shadow state needed.)
 String wifiSSID;
 String wifiPass;
 bool wifiAP;
@@ -1612,75 +1963,9 @@ WElement marcduinoContents[] = {
     WVerticalAlign(),
 };
 
-WElement parametersContents[] = {
-    WTextFieldInteger("Min lifter power", "lftminpwr",
-        []()->String { return String(paramLifterMinPower = LIFTER_MINIMUM_POWER); },
-        [](String val) { paramLifterMinPower = val.toInt(); }),
-    WTextFieldInteger("Min seek-bottom power", "lftseekbotpwr",
-        []()->String { return String(paramLifterSeekBotPower = LIFTER_SEEKBOTTTOM_POWER); },
-        [](String val) { paramLifterSeekBotPower = val.toInt(); }),
-    WTextFieldInteger("Min rotary power", "rotminpwr",
-        []()->String { return String(paramRotaryMinPower = ROTARY_MINIMUM_POWER); },
-        [](String val) { paramRotaryMinPower = val.toInt(); }),
-    WTextFieldInteger("Lifter distance (ticks)", "lftdist",
-        []()->String { return String(paramLifterDistance = LIFTER_DISTANCE); },
-        [](String val) { paramLifterDistance = val.toInt(); }),
-    WSlider("Safe spin height (% of travel)", "minsafeheight", 0, 100,
-        []()->int {
-            paramMinHeight = ROTARY_MINIMUM_HEIGHT;
-            int dist = max(1, LIFTER_DISTANCE);
-            return paramMinHeight * 100 / dist;
-        },
-        [](int pct) { paramMinHeight = pct * max(1, LIFTER_DISTANCE) / 100; }),
-    WButton("Set to current height", "setsafeheight", []() {
-        lifter.setSafeSpinHeightToCurrent();
-        paramMinHeight = ROTARY_MINIMUM_HEIGHT;
-    }),
-    WHorizontalAlign(),
-    WSlider("Drift correction (% threshold, 0=off)", "driftpct", 0, 20,
-        []()->int {
-            return paramDriftPct = sLifterParameters.fDriftCorrectionPct;
-        },
-        [](int val) { paramDriftPct = val; }),
-    WVerticalAlign(),
-    WCheckbox("Disable rotary unit", "rotdisabled",
-        []() { return paramRotDisabled = sSettings.fDisableRotary; },
-        [](bool val) { paramRotDisabled = val; }),
-    WVerticalAlign(),
-    WLabel("Load defaults:", "dflbl"),
-    WButtonReload("Greg", "greg", []() {
-        LIFTER_MINIMUM_POWER     = GREG_LIFTER_MINIMUM_POWER;
-        LIFTER_SEEKBOTTTOM_POWER = GREG_LIFTER_SEEKBOTTTOM_POWER;
-        ROTARY_MINIMUM_POWER     = GREG_ROTARY_MINIMUM_POWER;
-        LIFTER_DISTANCE          = GREG_LIFTER_DISTANCE;
-        ROTARY_MINIMUM_HEIGHT    = LIFTER_DISTANCE / 2;
-        sLifterParameters.fDriftCorrectionPct = DEFAULT_DRIFT_CORRECTION_PCT;
-    }),
-    WHorizontalAlign(),
-    WButtonReload("IA-Parts", "iaparts", []() {
-        LIFTER_MINIMUM_POWER     = IAPARTS_LIFTER_MINIMUM_POWER;
-        LIFTER_SEEKBOTTTOM_POWER = IAPARTS_LIFTER_SEEKBOTTTOM_POWER;
-        ROTARY_MINIMUM_POWER     = IAPARTS_ROTARY_MINIMUM_POWER;
-        LIFTER_DISTANCE          = IAPARTS_LIFTER_DISTANCE;
-        ROTARY_MINIMUM_HEIGHT    = LIFTER_DISTANCE / 2;
-        sLifterParameters.fDriftCorrectionPct = DEFAULT_DRIFT_CORRECTION_PCT;
-    }),
-    WVerticalAlign(),
-    WButton("Save", "save", []() {
-        LIFTER_MINIMUM_POWER     = min(max(paramLifterMinPower, 0), 100);
-        LIFTER_SEEKBOTTTOM_POWER = min(max(paramLifterSeekBotPower, 0), 100);
-        ROTARY_MINIMUM_POWER     = min(max(paramRotaryMinPower, 0), 100);
-        LIFTER_DISTANCE          = max(paramLifterDistance, 0);
-        ROTARY_MINIMUM_HEIGHT    = min(max(paramMinHeight, 0), LIFTER_DISTANCE);
-        sLifterParameters.fDriftCorrectionPct = min(max(paramDriftPct, 0), 20);
-        sLifterParameters.save();
-        if (paramRotDisabled != sSettings.fDisableRotary)
-            { sSettings.fDisableRotary = paramRotDisabled; sUpdateSettings = true; }
-    }),
-    WHorizontalAlign(),
-    WButton("Back", "back", "/setup"),
-    WVerticalAlign(),
-};
+// Parameters page is hand-rendered by printParametersPage() — see further below.
+// State load/save flows through /api/params (GET, returns JSON snapshot) and
+// /api/params/save (POST, applies all fields atomically).
 
 WElement wifiContents[] = {
     W1("WiFi setup"),
@@ -1810,8 +2095,15 @@ WPage pages[] = {
             out.println();
             printWizardPage(out);
         }),
+    WAPI("/parameters",
+        [](Print& out, String qs) {
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:text/html");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            printParametersPage(out);
+        }),
     WPage("/marcduino",  marcduinoContents,  SizeOfArray(marcduinoContents)),
-    WPage("/parameters", parametersContents, SizeOfArray(parametersContents)),
     WPage("/wifi",       wifiContents,       SizeOfArray(wifiContents)),
     WPage("/remote",     remoteContents,     SizeOfArray(remoteContents)),
     WPage("/firmware",   firmwareContents,   SizeOfArray(firmwareContents)),
@@ -2041,6 +2333,7 @@ WPage pages[] = {
             out.print(",\"rotHome\":"); out.print(lifter.rotaryHomeLimit() ? "true" : "false");
             out.print(",\"calibrated\":"); out.print((sSettings.fUpLimitsCalibrated && sSettings.fDownLimitsCalibrated) ? "true" : "false");
             out.print(",\"minPower\":"); out.print(sSettings.fMinimumPower);
+            out.print(",\"inverted\":"); out.print(sSettings.fLifterInverted ? "true" : "false");
             out.print("}");
         }),
 
@@ -2058,6 +2351,181 @@ WPage pages[] = {
             out.println("Cache-Control:no-cache");
             out.println();
             out.print("{\"ok\":true,\"reboot\":true}");
+        }),
+
+    // Calibrate-page motor selector — changes motor type and marks wizard
+    // complete (bypasses the guided setup). Invalidates prior calibration.
+    WAPI("/api/setmotor",
+        [](Print& out, String qs) {
+            int idx = qs.indexOf("type=");
+            int type = (idx >= 0) ? qs.substring(idx + 5).toInt() : MOTOR_GREG_6_3_1;
+            changeMotorTypeBypassWizard(type);
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":true,\"reboot\":true}");
+        }),
+
+    // Toggle lifter direction inversion. Query: ?value=0|1.
+    // Flips both motor PWM polarity and encoder B-pin sense so the
+    // firmware's "up" matches the physical "up" regardless of wiring.
+    // Invalidates calibration since limit-switch ends swap.
+    WAPI("/api/setinvert",
+        [](Print& out, String qs) {
+            int idx = qs.indexOf("value=");
+            int value = (idx >= 0) ? qs.substring(idx + 6).toInt() : 0;
+            sSettings.fLifterInverted = (value != 0);
+            sSettings.fUpLimitsCalibrated = false;
+            sSettings.fDownLimitsCalibrated = false;
+            sSettings.fLifterDistance = 0;
+            sSettings.write();
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":true,\"inverted\":");
+            out.print(sSettings.fLifterInverted ? "true" : "false");
+            out.print("}");
+        }),
+
+    // Parameters page — current snapshot.
+    WAPI("/api/params",
+        [](Print& out, String qs) {
+            int dist = max(1, LIFTER_DISTANCE);
+            int safePct = ROTARY_MINIMUM_HEIGHT * 100 / dist;
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"lftminpwr\":"); out.print(LIFTER_MINIMUM_POWER);
+            out.print(",\"lftseekbotpwr\":"); out.print(LIFTER_SEEKBOTTTOM_POWER);
+            out.print(",\"rotminpwr\":"); out.print(ROTARY_MINIMUM_POWER);
+            out.print(",\"lftdist\":"); out.print(LIFTER_DISTANCE);
+            out.print(",\"minsafeheight\":"); out.print(safePct);
+            out.print(",\"driftpct\":"); out.print(sLifterParameters.fDriftCorrectionPct);
+            out.print(",\"rotdisabled\":"); out.print(sSettings.fDisableRotary ? "true" : "false");
+            out.print(",\"aggression\":"); out.print(sLifterParameters.fAggressiveness);
+            out.print("}");
+        }),
+
+    // Parameters page — apply all values atomically. Each field is optional;
+    // missing fields keep their current value.
+    WAPI("/api/params/save",
+        [](Print& out, String qs) {
+            auto getInt = [&](const char* key, int def) -> int {
+                String prefix = String(key) + "=";
+                int p = qs.indexOf(prefix);
+                if (p < 0) return def;
+                int start = p + prefix.length();
+                int end = qs.indexOf('&', start);
+                String s = (end < 0) ? qs.substring(start) : qs.substring(start, end);
+                return s.toInt();
+            };
+            int lftMin   = getInt("lftminpwr",     LIFTER_MINIMUM_POWER);
+            int lftBot   = getInt("lftseekbotpwr", LIFTER_SEEKBOTTTOM_POWER);
+            int rotMin   = getInt("rotminpwr",     ROTARY_MINIMUM_POWER);
+            int lftDist  = getInt("lftdist",       LIFTER_DISTANCE);
+            int safePct  = getInt("minsafeheight", -1);
+            int drift    = getInt("driftpct",      sLifterParameters.fDriftCorrectionPct);
+            int rotDis   = getInt("rotdisabled",   sSettings.fDisableRotary ? 1 : 0);
+            int aggro    = getInt("aggression",    sLifterParameters.fAggressiveness);
+
+            LIFTER_MINIMUM_POWER     = min(max(lftMin, 0), 100);
+            LIFTER_SEEKBOTTTOM_POWER = min(max(lftBot, 0), 100);
+            ROTARY_MINIMUM_POWER     = min(max(rotMin, 0), 100);
+            LIFTER_DISTANCE          = max(lftDist, 0);
+            if (safePct >= 0)
+                ROTARY_MINIMUM_HEIGHT = min(max(safePct, 0), 100) * max(1, LIFTER_DISTANCE) / 100;
+            sLifterParameters.fDriftCorrectionPct = min(max(drift, 0), 20);
+            sLifterParameters.fAggressiveness     = min(max(aggro, 0), 2);
+            sLifterParameters.save();
+
+            bool wantDis = (rotDis != 0);
+            if (wantDis != sSettings.fDisableRotary) {
+                sSettings.fDisableRotary = wantDis;
+                sUpdateSettings = true;
+            }
+
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":true}");
+        }),
+
+    // Snap "safe spin height" to the lifter's current position.
+    WAPI("/api/params/safespin_current",
+        [](Print& out, String qs) {
+            lifter.setSafeSpinHeightToCurrent();
+            sLifterParameters.save();
+            int dist = max(1, LIFTER_DISTANCE);
+            int pct = ROTARY_MINIMUM_HEIGHT * 100 / dist;
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":true,\"pct\":"); out.print(pct); out.print("}");
+        }),
+
+    // Start/stop auto random move mode. Query: ?level=g|m|a (optional) overrides
+    // the global aggressiveness for this run only. ?stop=1 ends move mode.
+    WAPI("/api/movemode",
+        [](Print& out, String qs) {
+            int stopIdx = qs.indexOf("stop=");
+            if (stopIdx >= 0 && qs.substring(stopIdx + 5).toInt() != 0) {
+                lifter.moveModeEnd();
+                out.println("HTTP/1.0 200 OK");
+                out.println("Content-type:application/json");
+                out.println("Cache-Control:no-cache");
+                out.println();
+                out.print("{\"ok\":true,\"running\":false}");
+                return;
+            }
+            int level = -1;  // -1 = use stored default
+            int li = qs.indexOf("level=");
+            if (li >= 0) {
+                char c = qs.charAt(li + 6);
+                if (c == 'g' || c == 'G') level = 0;
+                else if (c == 'm' || c == 'M') level = 1;
+                else if (c == 'a' || c == 'A') level = 2;
+            }
+            lifter.moveModeEnd();
+            lifter.moveModeAutoStart(level);
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":true,\"running\":true,\"level\":");
+            int actual = (level >= 0) ? level : sLifterParameters.fAggressiveness;
+            out.print(actual);
+            out.print("}");
+        }),
+
+    // Load factory defaults for a motor type into the live parameter set
+    // (does NOT save — user must hit Save). type=0 (Greg 6.3:1) or 2 (IA-Parts).
+    WAPI("/api/params/defaults",
+        [](Print& out, String qs) {
+            int idx = qs.indexOf("type=");
+            int type = (idx >= 0) ? qs.substring(idx + 5).toInt() : 0;
+            if (type == 2) {
+                LIFTER_MINIMUM_POWER     = IAPARTS_LIFTER_MINIMUM_POWER;
+                LIFTER_SEEKBOTTTOM_POWER = IAPARTS_LIFTER_SEEKBOTTTOM_POWER;
+                ROTARY_MINIMUM_POWER     = IAPARTS_ROTARY_MINIMUM_POWER;
+                LIFTER_DISTANCE          = IAPARTS_LIFTER_DISTANCE;
+            } else {
+                LIFTER_MINIMUM_POWER     = GREG_LIFTER_MINIMUM_POWER;
+                LIFTER_SEEKBOTTTOM_POWER = GREG_LIFTER_SEEKBOTTTOM_POWER;
+                ROTARY_MINIMUM_POWER     = GREG_ROTARY_MINIMUM_POWER;
+                LIFTER_DISTANCE          = GREG_LIFTER_DISTANCE;
+            }
+            ROTARY_MINIMUM_HEIGHT = LIFTER_DISTANCE / 2;
+            sLifterParameters.fDriftCorrectionPct = DEFAULT_DRIFT_CORRECTION_PCT;
+            out.println("HTTP/1.0 200 OK");
+            out.println("Content-type:application/json");
+            out.println("Cache-Control:no-cache");
+            out.println();
+            out.print("{\"ok\":true}");
         }),
 
     // Advance wizard to next step (used for checklist steps that don't involve motion).

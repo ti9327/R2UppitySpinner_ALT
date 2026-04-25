@@ -36,9 +36,11 @@ Getting the rotary to land in exactly the same position repeatably is harder tha
 
 All vertical motion uses a 3ms on / 1ms off pulse pattern throughout the move. Because a lead screw self-locks when power is cut, each pulse moves roughly one encoder tick and the mechanism brakes mechanically in the off period. This prevents the violent impacts at the limit switches that continuous-drive firmware causes when momentum builds up over a long travel — the mechanism slows itself down by physics, not just by a speed ramp.
 
-### Safe Random Mode
+### Safe Random Mode — With Aggressiveness Levels
 
-Sending a bare `:PM` fires a randomized auto-sequence that cycles through 6 action types — raises, rotations, pauses, and combinations — all enforcing safe rotary height and homing as needed between moves. It's designed to run at events without operator intervention and without putting the mechanism in a state it can't recover from. One command, genuine-looking random behavior, safe.
+Sending a bare `:PM` fires a randomized auto-sequence that cycles through 6 action types — raises, rotations, pauses, and combinations — all enforcing safe rotary height and homing as needed between moves. It's designed to run at events without operator intervention and without putting the mechanism in a state it can't recover from.
+
+Three aggressiveness levels (**Gentle / Medium / Aggressive**) scale lift speeds, rotary speeds, action mix, and inter-action delay so the same one command can read as a calm idle loop or a frantic alert. Set the global default on the Parameters page, or override per run from the web UI buttons or via `:PMG` / `:PMM` / `:PMA`. Rotary safety is enforced at every level — every descent still homes the rotary first regardless of aggressiveness.
 
 ### E-STOP That Actually Stops
 
@@ -137,7 +139,8 @@ All commands use the Marcduino protocol. Multiple commands can be chained with c
 | `:PD<degrees>[,speed][,maxspeed]` | Rotate relative degrees (+ = CCW, − = CW) |
 | `:PDR[,speed][,maxspeed]` | Random relative rotation |
 | `:PR<speed>` | Continuous spin (+ = CCW, − = CW; 0 = stop/home) |
-| `:PM[,liftSpd,rotSpd,minInt,maxInt]` | Safe random animation mode |
+| `:PM[,liftSpd,rotSpd,minInt,maxInt]` | Safe random animation mode (uses default aggressiveness) |
+| `:PMG` / `:PMM` / `:PMA` | Random animation, one-shot Gentle / Medium / Aggressive override |
 | `:PW[R]<seconds>` | Wait (R = randomize 1..N seconds) |
 | `:PL<0-7>` | Light kit mode |
 | `:PS<0-100>` | Play stored sequence |
@@ -149,6 +152,8 @@ All commands use the Marcduino protocol. Multiple commands can be chained with c
 | `#PSC` | Run calibration |
 | `#PCONFIG` | Display full configuration (includes firmware version) |
 | `#PSTATUS` | Show WiFi/remote status |
+| `#PMOTOR<n>` | Query (no arg) or set lifter motor profile (0=6.3:1, 1=19:1, 2=IA-Parts) |
+| `#PAGGRESSION[<0-2>]` | Query or set default random aggressiveness (0=Gentle, 1=Medium, 2=Aggressive) |
 | `#PFACTORY` | Factory reset (clear all preferences and sequences) |
 | `#PS<n>:<seq>` | Store sequence (e.g. `#PS1:H`) |
 | `#PL` | List stored sequences |
@@ -181,6 +186,8 @@ All commands use the Marcduino protocol. Multiple commands can be chained with c
 
 **Calibration distance seems wrong** — If the measured distance differs more than 20% from stored, it's automatically rejected. Run calibration with the dome removed to establish a clean baseline.
 
+**Light kit powers on but cycles through all modes and ignores `:PL<n>` commands** — If you're running the [drolsen r2-periscope-lighting](https://github.com/drolsen/r2-periscope-lighting) Pro Mini sketch, open `PeriscopeLightsCode.ino` and set `COMTYPE = 0` (ABC mode), then re-upload to the light kit. The Uppity Spinner only drives the light kit over the parallel ABC pins on the PCF8574 expander — it does not send serial commands to the light kit. In the sketch's default `COMTYPE = 1` (RX/TX) mode, the A and B pins are repurposed as serial lines, so the kit never sees the mode bits and falls back to auto-cycling through every sequence. The firmware will still print `LIGHT: <n>` on the serial monitor when you send `:PL<n>` because it's correctly writing the ABC pins — the kit just isn't listening on that interface.
+
 ---
 
 ## PCB Assembly Videos
@@ -193,6 +200,14 @@ For builders starting from scratch, the original assembly walkthroughs are still
 ---
 
 ## Changelog
+
+### v3.5.0 — Aggressiveness levels + Parameters page rebuild
+- **Selectable random aggressiveness.** The auto-move mode now has Gentle / Medium / Aggressive profiles that scale lift speed bands, rotary speed bands, action mix, and inter-action delay. Gentle skips the two highest-energy switch cases entirely. Rotary safety is preserved at every level — every descent path still homes the rotary first regardless of aggressiveness.
+- **Per-invocation overrides.** New `:PMG` / `:PMM` / `:PMA` Marcduino commands launch a one-shot run at the specified level without touching the global default. New Periscope-tab buttons (Gentle / Medium / Aggressive / Stop) call a `/api/movemode?level=g|m|a` endpoint.
+- **Global default in Preferences.** The Parameters page has a new Aggressiveness dropdown that sets what bare `:PM` and the "random (default)" web button use. Settable from serial via `#PAGGRESSION<n>` (0/1/2). Persisted to flash.
+- **Parameters page rebuilt.** Restyled to match the Calibrate / Periscope card layout — motor thresholds, safe-spin height (with "use current" capture), drift correction, rotary disable, aggressiveness, and load-defaults buttons all in one consistent UI. Backed by a new JSON `/api/params` + `/api/params/save` pair.
+- **Speed=100 no longer silently fails.** Seeks now fall back gracefully to the highest calibrated slot when the requested speed lands above the calibration sweep cap (e.g. requesting 100% on a 19:1 motor whose calibration intentionally tops out at 85%). The Periscope-tab lift speed slider also auto-caps to the active motor's `maxThrottle` so you can't slide past what the motor profile allows.
+- **Lifter direction invert** exposed in the web UI for builds where the lifter wiring runs in reverse.
 
 ### v3.4.0 — Multi-motor support + first-run wizard
 - **19:1 lifter motor support.** Added user-selectable motor type (Pololu 4757 6.3:1 / Pololu 4751 19:1 / IA-Parts). Each motor ships with its own tuned profile: throttle ceiling, stall timeout, pulse timing, calibration sweep cap, soft-approach ramp. The 19:1 profile is locked at 0.75 throttle with a 700ms stall timeout and 15% top-of-travel ramp to prevent the frame damage Greg Hulette hit during early 19:1 bring-up.

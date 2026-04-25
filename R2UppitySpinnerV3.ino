@@ -99,7 +99,7 @@ inline void _debugPrintln() { Serial.println(); sDebugSuppressNewClient = false;
 // Bump this string with each release so serial, web, and #PCONFIG all show
 // which build is running.
 ///////////////////////////////////
-#define FIRMWARE_VERSION "3.4.0"
+#define FIRMWARE_VERSION "3.5.0"
 
 ///////////////////////////////////
 // CONFIGURABLE OPTIONS
@@ -320,17 +320,6 @@ static const LifterMotorProfile kProfileIAParts = {
 // the user explicitly selects a different motor.
 static const LifterMotorProfile* sMotor = &kProfileGreg6p3;
 
-static const LifterMotorProfile* motorProfileFor(int motorType)
-{
-    switch (motorType)
-    {
-        case MOTOR_POLOLU_19_1: return &kProfilePololu19;
-        case MOTOR_IAPARTS:     return &kProfileIAParts;
-        case MOTOR_GREG_6_3_1:
-        default:                return &kProfileGreg6p3;
-    }
-}
-
 // Internal PID constants — you should not need to change these.
 #define OUTPUT_LIMIT_PRESCALE               3.1
 #define DISTANCE_OUTPUT_SCALE               3
@@ -388,6 +377,7 @@ static const LifterMotorProfile* motorProfileFor(int motorType)
 #define PREFERENCES_PARAM_ROTARY_MININUM_HEIGHT  "minheight"
 #define PREFERENCES_PARAM_ROTARY_ENCODER_COUNT   "rotenccount"
 #define PREFERENCES_PARAM_DRIFT_CORRECTION_PCT  "driftpct"
+#define PREFERENCES_PARAM_AGGRESSIVENESS         "aggression"
 #define DEFAULT_DRIFT_CORRECTION_PCT            5   // re-seek if drifted more than 5%
 #define PREFERENCES_PARAM_MOTOR_TYPE             "motortype"
 #define PREFERENCES_PARAM_WIZARD_STATE           "wizstate"
@@ -673,6 +663,7 @@ struct LifterParameters
     int fRotaryMinHeight;       // Lifter must be above this tick count before spinning is allowed
     int fRotaryEncoderCount;    // Ticks per full 360° rotation, cached across reboots
     int fDriftCorrectionPct;    // Re-seek if lifter drifts more than this % (0 = disabled)
+    int fAggressiveness;        // Auto-random level: 0=Gentle, 1=Medium, 2=Aggressive
     int fMotorType;             // LifterMotorType enum — selects the active LifterMotorProfile
     int fWizardState;           // WizardState enum — tracks first-run wizard progress
 
@@ -685,6 +676,7 @@ struct LifterParameters
         fRotaryMinHeight = preferences.getInt(PREFERENCES_PARAM_ROTARY_MININUM_HEIGHT, DEFAULT_ROTARY_MINIMUM_HEIGHT);
         fRotaryEncoderCount = preferences.getInt(PREFERENCES_PARAM_ROTARY_ENCODER_COUNT, 0);
         fDriftCorrectionPct = preferences.getInt(PREFERENCES_PARAM_DRIFT_CORRECTION_PCT, DEFAULT_DRIFT_CORRECTION_PCT);
+        fAggressiveness = preferences.getInt(PREFERENCES_PARAM_AGGRESSIVENESS, 1);  // default Medium
         fMotorType = preferences.getInt(PREFERENCES_PARAM_MOTOR_TYPE, MOTOR_GREG_6_3_1);
         // Existing installs (upgrading from pre-wizard firmware) had no wizard state
         // but likely have working calibration — treat them as already-complete to avoid
@@ -702,6 +694,7 @@ struct LifterParameters
         preferences.putInt(PREFERENCES_PARAM_ROTARY_MININUM_HEIGHT, fRotaryMinHeight);
         preferences.putInt(PREFERENCES_PARAM_ROTARY_ENCODER_COUNT, fRotaryEncoderCount);
         preferences.putInt(PREFERENCES_PARAM_DRIFT_CORRECTION_PCT, fDriftCorrectionPct);
+        preferences.putInt(PREFERENCES_PARAM_AGGRESSIVENESS, fAggressiveness);
         preferences.putInt(PREFERENCES_PARAM_MOTOR_TYPE, fMotorType);
         preferences.putInt(PREFERENCES_PARAM_WIZARD_STATE, fWizardState);
     }
@@ -713,7 +706,13 @@ LifterParameters sLifterParameters;
 // Call after sLifterParameters.load() at boot, and whenever fMotorType changes.
 static void setMotorProfile(int motorType)
 {
-    sMotor = motorProfileFor(motorType);
+    switch (motorType)
+    {
+        case MOTOR_POLOLU_19_1: sMotor = &kProfilePololu19; break;
+        case MOTOR_IAPARTS:     sMotor = &kProfileIAParts; break;
+        case MOTOR_GREG_6_3_1:
+        default:                sMotor = &kProfileGreg6p3; break;
+    }
     DEBUG_PRINT("Motor profile: ");
     DEBUG_PRINTLN(sMotor->fName);
 }
@@ -754,12 +753,12 @@ static bool wizardAllowsMotion()
     return wizardComplete() || sWizardMotionOverride;
 }
 
-static void wizardAdvance(WizardState next)
+static void wizardAdvance(int next)
 {
     sLifterParameters.fWizardState = next;
     sLifterParameters.save();
     Serial.print("WIZARD advance -> ");
-    Serial.println((int)next);
+    Serial.println(next);
 }
 
 static void wizardReset()
@@ -769,55 +768,8 @@ static void wizardReset()
     Serial.println("WIZARD reset");
 }
 
-// Change the active motor type. Called from the wizard or Parameters page.
-// Side effects: applies profile defaults, invalidates calibration, resets
-// the wizard state machine. Caller must reboot afterward (this function does
-// not reboot — gives the caller a chance to persist other state first).
-static void wizardChangeMotorType(int newType)
-{
-    if (newType < 0 || newType >= MOTOR_TYPE_COUNT)
-        newType = MOTOR_GREG_6_3_1;
-
-    Serial.print("WIZARD change motor type: ");
-    Serial.print(sLifterParameters.fMotorType);
-    Serial.print(" -> ");
-    Serial.println(newType);
-
-    sLifterParameters.fMotorType = newType;
-    setMotorProfile(newType);
-    applyMotorProfileDefaults();
-    sLifterParameters.fWizardState = WIZARD_NOT_STARTED;
-    sLifterParameters.save();
-
-    // Invalidate calibration — prior per-build tables are meaningless for a
-    // different motor (different ticks per travel, different min-power).
-    sSettings.fUpLimitsCalibrated = false;
-    sSettings.fDownLimitsCalibrated = false;
-    sSettings.write();
-}
-
-// Called once at boot, after sSettings.read() succeeds, to decide whether this
-// is a fresh install (wizard required) or an upgrade from pre-wizard firmware
-// (has valid calibration → treat as WIZARD_COMPLETE to avoid forcing a
-// re-calibration on firmware upgrade).
-static void initWizardStateFromBoot()
-{
-    if (sLifterParameters.fWizardState >= WIZARD_COMPLETE)
-        return;  // wizard already done, nothing to do
-
-    // Upgrade detection: pre-wizard firmware had no fWizardState key. If the
-    // existing calibration tables are valid, this is an upgrade, not a fresh
-    // install — silently promote the wizard to complete.
-    if (sSettings.fUpLimitsCalibrated && sSettings.fDownLimitsCalibrated)
-    {
-        Serial.println("WIZARD: existing calibration detected — marking complete (firmware upgrade path)");
-        sLifterParameters.fWizardState = WIZARD_COMPLETE;
-        sLifterParameters.save();
-        return;
-    }
-
-    Serial.println("WIZARD: first-run setup required — motor motion gated until complete");
-}
+// wizardChangeMotorType and initWizardStateFromBoot are defined later — they
+// reference sSettings (declared further down) so they live after that point.
 
 #define LIFTER_MINIMUM_POWER        sLifterParameters.fLifterMinPower
 #define LIFTER_SEEKBOTTTOM_POWER    sLifterParameters.fLifterMinSeekBotPower
@@ -858,6 +810,8 @@ struct LifterSettings
             bool fDownLimitsCalibrated:1;
             bool fSafetyManeuver:1;      // (unused)
             bool fDisableRotary:1;       // Set true via config command to disable rotary
+            bool fLifterInverted:1;      // true = swap motor PWM and encoder direction
+                                         // (use when lifter moves opposite to commanded direction)
         };
         uint8_t fFlags;
     };
@@ -879,6 +833,87 @@ struct LifterSettings
     }
 };
 EEPROMSettings<LifterSettings> sSettings;
+
+// Wizard helpers that reference sSettings — must live after sSettings is declared.
+
+// Change the active motor type. Called from the wizard or Parameters page.
+// Side effects: applies profile defaults, invalidates calibration, resets
+// the wizard state machine. Caller must reboot afterward (this function does
+// not reboot — gives the caller a chance to persist other state first).
+static void wizardChangeMotorType(int newType)
+{
+    if (newType < 0 || newType >= MOTOR_TYPE_COUNT)
+        newType = MOTOR_GREG_6_3_1;
+
+    Serial.print("WIZARD change motor type: ");
+    Serial.print(sLifterParameters.fMotorType);
+    Serial.print(" -> ");
+    Serial.println(newType);
+
+    sLifterParameters.fMotorType = newType;
+    setMotorProfile(newType);
+    applyMotorProfileDefaults();
+    sLifterParameters.fWizardState = WIZARD_NOT_STARTED;
+    sLifterParameters.save();
+
+    // Invalidate calibration — prior per-build tables are meaningless for a
+    // different motor (different ticks per travel, different min-power).
+    sSettings.fUpLimitsCalibrated = false;
+    sSettings.fDownLimitsCalibrated = false;
+    sSettings.fLifterDistance = 0;   // force fallback to profile default
+    sSettings.fMinimumPower = 0;     // force fallback to profile default
+    sSettings.write();
+}
+
+// Change motor type WITHOUT going through the wizard. Used by the Calibrate
+// page's motor selector for power-users who want to skip the guided setup.
+// Same calibration invalidation as wizardChangeMotorType, but marks the wizard
+// complete so motion is unblocked. Caller is expected to reboot afterward.
+static void changeMotorTypeBypassWizard(int newType)
+{
+    if (newType < 0 || newType >= MOTOR_TYPE_COUNT)
+        newType = MOTOR_GREG_6_3_1;
+
+    Serial.print("MOTOR change (bypass wizard): ");
+    Serial.print(sLifterParameters.fMotorType);
+    Serial.print(" -> ");
+    Serial.println(newType);
+
+    sLifterParameters.fMotorType = newType;
+    setMotorProfile(newType);
+    applyMotorProfileDefaults();
+    sLifterParameters.fWizardState = WIZARD_COMPLETE;
+    sLifterParameters.save();
+
+    sSettings.fUpLimitsCalibrated = false;
+    sSettings.fDownLimitsCalibrated = false;
+    sSettings.fLifterDistance = 0;
+    sSettings.fMinimumPower = 0;
+    sSettings.write();
+}
+
+// Called once at boot, after sSettings.read() succeeds, to decide whether this
+// is a fresh install (wizard required) or an upgrade from pre-wizard firmware
+// (has valid calibration → treat as WIZARD_COMPLETE to avoid forcing a
+// re-calibration on firmware upgrade).
+static void initWizardStateFromBoot()
+{
+    if (sLifterParameters.fWizardState >= WIZARD_COMPLETE)
+        return;  // wizard already done, nothing to do
+
+    // Upgrade detection: pre-wizard firmware had no fWizardState key. If the
+    // existing calibration tables are valid, this is an upgrade, not a fresh
+    // install — silently promote the wizard to complete.
+    if (sSettings.fUpLimitsCalibrated && sSettings.fDownLimitsCalibrated)
+    {
+        Serial.println("WIZARD: existing calibration detected — marking complete (firmware upgrade path)");
+        sLifterParameters.fWizardState = WIZARD_COMPLETE;
+        sLifterParameters.save();
+        return;
+    }
+
+    Serial.println("WIZARD: first-run setup required — motor motion gated until complete");
+}
 
 ///////////////////////////////////
 // GLOBAL STATE VARIABLES
@@ -1192,6 +1227,12 @@ public:
             }
             return;
         }
+
+        // Direction invert (set via the calibrate page when wiring polarity is
+        // reversed): flip the commanded direction here, and the matching ISR
+        // flip in measureLifterEncoder() keeps encoder readings consistent.
+        if (sSettings.fLifterInverted)
+            throttle = -throttle;
 
         bool reverse = (throttle < 0);
         // Clamp commanded throttle to the active motor profile's hard ceiling.
@@ -2768,16 +2809,26 @@ public:
     {
         Serial.print("WIZARD CREEP ");
         Serial.println(goDown ? "DOWN" : "UP");
-        // Use 30% of the motor profile's ceiling — intentionally weak so a wrong
-        // limit switch or mechanical bind produces noise, not frame damage.
-        float creepSpeed = 0.30f * sMotor->fMaxCommandedThrottle;
+        // Creep speed: floor at the profile's minimum-power setting so high-
+        // reduction motors (19:1) can break free of static friction. Cap at the
+        // profile ceiling.
+        float minFloor = sMotor->fDefaultMinPower / 100.0f;
+        float creepSpeed = max(0.30f * sMotor->fMaxCommandedThrottle, minFloor);
+        creepSpeed = min(creepSpeed, sMotor->fMaxCommandedThrottle);
+        Serial.print("WIZARD CREEP speed="); Serial.println(creepSpeed, 3);
         if (goDown) creepSpeed = -creepSpeed;
 
         long seekPrevPos = getLifterPosition();
         uint32_t seekPosChangeMs = millis();
         uint32_t totalMs = millis();
-        const uint32_t CREEP_STALL_MS = 500;       // tighter than seek: any bind = abort
+        const uint32_t CREEP_STALL_MS = 1500;      // generous: high-reduction motors
+                                                   // can take >500ms to register a tick
         const uint32_t CREEP_MAX_MS = 30000;       // absolute ceiling, 30s
+
+        // Continuous drive (no pulsing). The pulsed pattern used by seek loops
+        // is for soft top-of-travel deceleration; during creep we just stop
+        // hard when the limit fires, so pulsing only chokes off the motor.
+        lifterMotorMove(creepSpeed);
 
         for (;;)
         {
@@ -2812,10 +2863,10 @@ public:
                 Serial.print("WIZARD CREEP: stall at pos="); Serial.println(cur);
                 return 0;
             }
+            // Re-assert the throttle each loop in case any internal path stopped it,
+            // then yield briefly so we don't spin the CPU.
             lifterMotorMove(creepSpeed);
-            delay(sMotor->fPulseOnMs);
-            lifterMotorStop();
-            delay(sMotor->fPulseOffMs);
+            delay(5);
         }
     }
 
@@ -3201,8 +3252,12 @@ public:
         }
     }
 
-    // Fully-randomized auto mode (bare :PM). Picks from a variety of visually
-    // dramatic actions designed for short-travel periscopes.
+    // Fully-randomized auto mode (bare :PM, or :PMG/:PMM/:PMA). Picks from a
+    // variety of visually dramatic actions designed for short-travel periscopes.
+    // Behavior is scaled by fMoveModeAutoLevel: Gentle/Medium/Aggressive.
+    // Rotary safety: every branch that lowers below safe height calls rotateHome()
+    // first, regardless of level — aggressiveness affects speeds and timing,
+    // never safety.
     static void animateAuto()
     {
         // Compute usable position range.  safeMin is the lowest the lifter can
@@ -3210,14 +3265,45 @@ public:
         float safeMin = (float)ROTARY_MINIMUM_HEIGHT / (float)max(1, (int)sSettings.getLifterDistance());
         float curPos = getLifterPositionClamped() / (float)max(1, (int)sSettings.getLifterDistance());
 
-        // Randomize a lift speed for this action: 65-85% — fast enough to look
-        // lively, slow enough for the pulsed soft stops to work well.
-        float liftSpeed = (sSettings.fMinimumPower + random(21)) / 100.0;
+        const int level = fMoveModeAutoLevel;  // 0=Gentle, 1=Medium, 2=Aggressive
 
-        // Random rotary speed: minimum+10 to 90%
-        int rotSpeed = ROTARY_MINIMUM_POWER + 10 + random(max(1, 90 - ROTARY_MINIMUM_POWER - 10));
+        // Per-level lift speed range (as % of motor's maxThrottle for predictability
+        // across motor types; the lifterMotorMove ceiling will clamp anyway).
+        // Gentle:    30-50%  — slow, deliberate
+        // Medium:    65-85%  — original behavior
+        // Aggressive: 80% to motor max — punchy, near full speed
+        int lsLo, lsHi;
+        if (level == 0) { lsLo = 30; lsHi = 50; }
+        else if (level == 1) { lsLo = 65; lsHi = 85; }
+        else { lsLo = 80; lsHi = max(85, (int)(sMotor->fMaxCommandedThrottle * 100)); }
+        // Floor by minimum power so we never command below breakaway threshold.
+        lsLo = max(lsLo, (int)sSettings.fMinimumPower);
+        lsHi = max(lsHi, lsLo);
+        float liftSpeed = (lsLo + random(lsHi - lsLo + 1)) / 100.0f;
 
-        switch (random(6))
+        // Per-level rotary speed range
+        int rsLo, rsHi;
+        if (level == 0) { rsLo = ROTARY_MINIMUM_POWER + 5;  rsHi = 40; }
+        else if (level == 1) { rsLo = ROTARY_MINIMUM_POWER + 10; rsHi = 90; }
+        else { rsLo = 70; rsHi = 100; }
+        rsLo = max(rsLo, ROTARY_MINIMUM_POWER + 5);
+        rsHi = max(rsHi, rsLo + 1);
+        int rotSpeed = rsLo + random(rsHi - rsLo);
+
+        // Action selection — Gentle picks from a curated subset that avoids
+        // full-range slams and high-speed spins. Medium/Aggressive use all 6.
+        // Gentle uses: 1=big lift, 3=random angle, 4=look around.
+        int picked;
+        if (level == 0)
+        {
+            static const int gentleCases[] = {1, 3, 4};
+            picked = gentleCases[random(3)];
+        }
+        else
+        {
+            picked = random(6);
+        }
+        switch (picked)
         {
             case 0:
             {
@@ -3356,6 +3442,19 @@ public:
                 break;
             }
         }
+
+        // Scale the inter-action wait by aggressiveness level.
+        // Gentle 2.0× (longer pauses), Medium 1.0× (unchanged), Aggressive 0.4×
+        // (shorter, more frequent firings).
+        uint32_t now = millis();
+        if (fMoveModeNextCmd > now)
+        {
+            uint32_t waitMs = fMoveModeNextCmd - now;
+            float scale = (level == 0) ? 2.0f : (level == 1) ? 1.0f : 0.4f;
+            uint32_t scaled = (uint32_t)(waitMs * scale);
+            // Floor at 300 ms so Aggressive doesn't busy-loop firing actions.
+            fMoveModeNextCmd = now + max(scaled, (uint32_t)300);
+        }
     }
 
     // Original parameterized move mode (e.g. :PM70,50,2,4)
@@ -3448,11 +3547,17 @@ public:
         // continue holding the last position after random mode ends.
     }
 
-    // Start fully-randomized auto mode (bare :PM with no arguments)
-    static void moveModeAutoStart()
+    // Start fully-randomized auto mode (bare :PM, or :PMG / :PMM / :PMA).
+    // levelOverride: -1 = use stored sLifterParameters.fAggressiveness;
+    // 0=Gentle, 1=Medium, 2=Aggressive. Override is per-invocation only —
+    // it does not persist to the global default.
+    static void moveModeAutoStart(int levelOverride = -1)
     {
         fMoveMode = true;
         fMoveModeAuto = true;
+        fMoveModeAutoLevel = (levelOverride >= 0 && levelOverride <= 2)
+            ? levelOverride
+            : min(max(sLifterParameters.fAggressiveness, 0), 2);
         fMoveModeNextLifterSpeed = 0;   // unused in auto mode
         fMoveModeNextRotarySpeed = 0;   // unused in auto mode
         fMoveModeNextIntervalMin = 0;   // unused in auto mode
@@ -3507,6 +3612,10 @@ private:
 
     ///////////////////////////////////
 
+    // Look up the calibrated outputLimit for a given speed. If the requested
+    // speed exceeds the calibration sweep cap (e.g. 19:1 stops at 85%), fall
+    // back to the highest calibrated entry rather than aborting. Caller can
+    // request 100% on any motor and silently get its top calibrated speed.
     static bool getDownOutputLimit(float speed, float &limit)
     {
         speed = min(max(speed, 0.0f), 1.0f);
@@ -3517,11 +3626,20 @@ private:
             limit = sSettings.fDownLimits[index].outputLimit;
             return true;
         }
-        DEBUG_PRINT("UNCALIBRATED SPEED - ");
-        DEBUG_PRINT(speed);
-        DEBUG_PRINT(" - ");
-        DEBUG_PRINTLN(index);
-        return false;
+        // Walk down to the highest calibrated entry below this index.
+        for (size_t i = (index < sSettings.limitCount()) ? index : sSettings.limitCount() - 1; i > 0; i--)
+        {
+            if (sSettings.fDownLimits[i].valid)
+            {
+                limit = sSettings.fDownLimits[i].outputLimit;
+                DEBUG_PRINT("DOWN SPEED CAPPED - requested=");
+                DEBUG_PRINT(int(speed*100));
+                DEBUG_PRINT(" using=");
+                DEBUG_PRINTLN(int(i*5));
+                return true;
+            }
+        }
+        return false;  // truly uncalibrated (no entries valid at all)
     }
 
     static bool getUpOutputLimit(float speed, float &limit)
@@ -3534,10 +3652,18 @@ private:
             limit = sSettings.fUpLimits[index].outputLimit;
             return true;
         }
-        DEBUG_PRINT("UNCALIBRATED SPEED - ");
-        DEBUG_PRINT(speed);
-        DEBUG_PRINT(" - ");
-        DEBUG_PRINTLN(index);
+        for (size_t i = (index < sSettings.limitCount()) ? index : sSettings.limitCount() - 1; i > 0; i--)
+        {
+            if (sSettings.fUpLimits[i].valid)
+            {
+                limit = sSettings.fUpLimits[i].outputLimit;
+                DEBUG_PRINT("UP SPEED CAPPED - requested=");
+                DEBUG_PRINT(int(speed*100));
+                DEBUG_PRINT(" using=");
+                DEBUG_PRINTLN(int(i*5));
+                return true;
+            }
+        }
         return false;
     }
 
@@ -3912,6 +4038,7 @@ public:
     // Move mode state
     static bool fMoveMode;
     static bool fMoveModeAuto;      // true = fully randomized (bare :PM), false = parameterized
+    static uint8_t fMoveModeAutoLevel;  // 0=Gentle, 1=Medium, 2=Aggressive (auto mode only)
     static uint32_t fMoveModeNextCmd;
     static uint8_t fMoveModeNextLifterSpeed;
     static uint8_t fMoveModeNextRotarySpeed;
@@ -3928,7 +4055,11 @@ PeriscopeLifter::measureLifterEncoder()
     encoder_lifter_val = digitalRead(PIN_LIFTER_ENCODER_A);
     if (encoder_lifter_pin_A_last == LOW && encoder_lifter_val == HIGH)
     {
-        if (digitalRead(PIN_LIFTER_ENCODER_B) == LOW)
+        bool bLow = (digitalRead(PIN_LIFTER_ENCODER_B) == LOW);
+        // Match the direction-invert flip applied in lifterMotorMove() so
+        // encoder reports remain consistent with commanded direction.
+        if (sSettings.fLifterInverted) bLow = !bLow;
+        if (bLow)
             encoder_lifter_ticks--;
         else
             encoder_lifter_ticks++;
@@ -3994,6 +4125,7 @@ bool PeriscopeLifter::fLifterHolding;
 
 bool PeriscopeLifter::fMoveMode;
 bool PeriscopeLifter::fMoveModeAuto;
+uint8_t PeriscopeLifter::fMoveModeAutoLevel;
 uint32_t PeriscopeLifter::fMoveModeNextCmd;
 uint8_t PeriscopeLifter::fMoveModeNextLifterSpeed;
 uint8_t PeriscopeLifter::fMoveModeNextRotarySpeed;
@@ -4154,11 +4286,25 @@ bool processLifterCommand(const char* cmd)
             // stop move mode
             lifter.moveModeEnd();
 
-            if (*cmd == '\0' || *cmd == ':')
+            // Aggressiveness override: :PMG / :PMM / :PMA pick the level explicitly
+            // for this run only (does not change the stored global default).
+            if (*cmd == 'G' || *cmd == 'M' || *cmd == 'A')
             {
-                // Bare :PM — fully randomized auto mode.
+                int level = (*cmd == 'G') ? 0 : (*cmd == 'M') ? 1 : 2;
+                cmd++;
+                Serial.print("MOVE MODE: auto random (override level=");
+                Serial.print(level == 0 ? "Gentle" : level == 1 ? "Medium" : "Aggressive");
+                Serial.println(")");
+                lifter.moveModeAutoStart(level);
+            }
+            else if (*cmd == '\0' || *cmd == ':')
+            {
+                // Bare :PM — fully randomized auto mode using stored aggressiveness.
                 // Picks from a variety of dramatic, safe actions each cycle.
-                Serial.println("MOVE MODE: auto random");
+                Serial.print("MOVE MODE: auto random (level=");
+                int defLvl = sLifterParameters.fAggressiveness;
+                Serial.print(defLvl == 0 ? "Gentle" : defLvl == 1 ? "Medium" : "Aggressive");
+                Serial.println(")");
                 lifter.moveModeAutoStart();
             }
             else
@@ -4651,6 +4797,33 @@ void processConfigureCommand(const char* cmd)
         }
     }
 #endif
+    else if (startswith(cmd, "AGGRESSION"))
+    {
+        // #PAGGRESSION       - print current global aggressiveness level
+        // #PAGGRESSION<n>    - set global default (0=Gentle, 1=Medium, 2=Aggressive)
+        // Sets the level used by bare :PM. Per-invocation :PMG/:PMM/:PMA still wins.
+        if (isdigit(*cmd))
+        {
+            uint32_t lvl = strtolu(cmd, &cmd);
+            if (lvl > 2)
+            {
+                Serial.println(F("Invalid. Valid: 0=Gentle, 1=Medium, 2=Aggressive"));
+            }
+            else
+            {
+                sLifterParameters.fAggressiveness = (int)lvl;
+                sLifterParameters.save();
+                Serial.print(F("Aggressiveness set: "));
+                Serial.println(lvl == 0 ? F("Gentle") : lvl == 1 ? F("Medium") : F("Aggressive"));
+            }
+        }
+        else
+        {
+            int lvl = sLifterParameters.fAggressiveness;
+            Serial.print(F("Aggressiveness: "));
+            Serial.println(lvl == 0 ? F("Gentle") : lvl == 1 ? F("Medium") : F("Aggressive"));
+        }
+    }
     else if (startswith(cmd, "MOTOR"))
     {
         // #PMOTOR           - print current motor type
