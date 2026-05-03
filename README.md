@@ -112,12 +112,45 @@ Both are auto-detected during calibration.
 
 1. Wire the ESP32, motor drivers, encoders, and limit switches per the Uppity Spinner PCB documentation.
 2. Copy the three libraries from this repo's `libraries/` folder into your Arduino `libraries/` folder.
-3. Flash the firmware via USB or OTA.
+3. Flash the firmware via USB (first time) or OTA (subsequent updates — see below).
 4. Connect to the WiFi access point: **SSID: `R2Uppity` / Password: `Astromech`**
 5. Open `http://192.168.4.1/` in a browser.
 6. Run calibration from the Setup page (or send `#PSC` over serial).
 
 Default serial baud rate: **9600**. Default I2C address: **0x20**.
+
+---
+
+## Updating Firmware Over WiFi (OTA)
+
+Once you have any version of this firmware running, you can update to a newer version **without a USB cable and without installing the Arduino IDE**. Updates are pushed through the device's own web interface.
+
+### For Testers (No Compile Needed)
+
+1. **Download the `.bin` file** from this repo's [Releases page](../../releases). Each release attaches a single file named like `R2UppitySpinnerV3-v3.5.2-test.bin`. Save it somewhere you can find it (Downloads folder is fine).
+2. **Connect to the periscope's WiFi.** SSID `R2Uppity`, password `Astromech` (or your configured network if you set one).
+3. **Open the web UI** at `http://192.168.4.1/` (or your configured IP).
+4. **Navigate to Setup → Firmware.**
+5. **Choose File**, pick the `.bin` you downloaded, then click **Flash firmware**.
+6. The device uploads, reflashes itself, and reboots automatically. The whole thing takes about 30 seconds.
+7. Once it comes back up, the firmware version in the status bar (bottom right) will reflect the new version. Done.
+
+**No re-calibration needed** for routine updates — your stored calibration, motor profile, and parameters all survive the flash. (The one exception: if release notes specifically say "re-run calibration," like when enabling Expert Mode for the first time on a 19:1.)
+
+**If something goes wrong**, the device's bootloader is untouched, so you can always recover by flashing over USB.
+
+### For Builders (Producing the `.bin`)
+
+If you want to build your own `.bin` from source (or are publishing a release):
+
+1. Open the sketch in the Arduino IDE.
+2. Make sure the right ESP32 board and partition scheme are selected.
+3. **Sketch → Export Compiled Binary.** This produces several files in the sketch folder. **Use only `R2UppitySpinnerV3.ino.bin`** for OTA — that's the application binary. Ignore `merged.bin`, `bootloader.bin`, `partitions.bin`, `.elf`, and `.map`. Those are for first-time USB flashing or debugging.
+4. Optionally rename to something version-tagged, e.g. `R2UppitySpinnerV3-v3.5.2-test.bin`, and attach to a GitHub Release.
+
+### Test Branch Releases
+
+The `v3.5.2-test` branch is where in-development features live before they merge to `main`. Pre-built binaries are attached to releases tagged `v3.5.2-test-r1`, `-r2`, etc. Try them at your own risk — feedback welcome via GitHub Issues. The stable build is whatever's currently on `main`.
 
 ---
 
