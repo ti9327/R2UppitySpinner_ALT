@@ -2057,10 +2057,20 @@ WElement remoteContents[] = {
 
 WElement firmwareContents[] = {
     W1("Firmware update"),
+    WHTML("<p style='margin:0 0 16px 0;font-size:14px;color:#333;line-height:1.55'>"
+          "<strong>Need a firmware file?</strong> "
+          "<a href='https://github.com/highfalutintodd/R2UppitySpinner_ALT/releases' "
+          "target='_blank' rel='noopener noreferrer' "
+          "style='color:#0a58ca;text-decoration:underline;font-weight:600'>"
+          "View available releases on GitHub &rarr;</a><br>"
+          "<span style='color:#666;font-size:13px'>"
+          "Download the <code>.bin</code> attached to a release, then upload it below. "
+          "Requires the device to be connected to a network with internet access "
+          "(or open the link from another device).</span></p>"),
     WFirmwareFile("Firmware file:", "firmware"),
     WFirmwareUpload("Flash firmware", "firmware"),
-    WLabel("Current build date:", "label"),
-    WLabel(__DATE__, "date"),
+    WLabel("Current firmware:", "label"),
+    WLabel("v" FIRMWARE_VERSION " (" __DATE__ ")", "date"),
 #ifdef BUILD_VERSION
     WHRef(BUILD_VERSION, "Sources"),
 #endif
