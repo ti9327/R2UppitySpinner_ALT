@@ -121,23 +121,52 @@ Default serial baud rate: **9600**. Default I2C address: **0x20**.
 
 ---
 
-## Updating Firmware Over WiFi (OTA)
+## Updating Firmware
 
-Once you have any version of this firmware running, you can update to a newer version **without a USB cable and without installing the Arduino IDE**. Updates are pushed through the device's own web interface.
+There are two ways to flash a new firmware version: **USB cable** (always works, ~1 minute) or **WiFi OTA** (no cable, but only reliable on stable WiFi).
 
-### For Testers (No Compile Needed)
+### Initial Jump from v3.5.0 → v3.5.2-test: Use USB
 
-1. **Download the `.bin` file** from this repo's [Releases page](../../releases). Each release attaches a single file named like `R2UppitySpinnerV3-v3.5.2-test.bin`. Save it somewhere you can find it (Downloads folder is fine).
-2. **Connect to the periscope's WiFi.** SSID `R2Uppity`, password `Astromech` (or your configured network if you set one).
+**Important:** if you're currently running v3.5.0 (or earlier) and want to try v3.5.2-test, **flash via USB**. The OTA endpoint in v3.5.0 has been observed to stall mid-upload when the laptop is connected directly to the droid's `R2Uppity` access point — the upload page can sit at "please wait" indefinitely with no progress feedback or timeout. After a USB flash to v3.5.2-test, future OTA updates between v3.5.2-test releases (r1 → r2 → r3) are more reliable because the upload UI in v3.5.2+ provides progress reporting and clearer error states.
+
+**USB flash steps:**
+
+1. Open the sketch in Arduino IDE (or download a pre-compiled binary from the [Releases page](../../releases) and use [esptool](https://github.com/espressif/esptool) directly).
+2. Connect the ESP32 to your computer with a USB cable.
+3. Select the correct board and port in Arduino IDE.
+4. Click **Upload**. Takes about a minute.
+5. The device reboots into the new firmware automatically.
+
+USB flashing always works regardless of OTA endpoint state, and it's the recommended fallback any time OTA fails.
+
+### OTA Updates (v3.5.2+ → Newer v3.5.2-test Builds)
+
+Once you're running v3.5.2-test, you can update to subsequent test releases (`-r2`, `-r3`, etc.) over WiFi without a cable.
+
+1. **Download the `.bin` file** from the [Releases page](../../releases). Each release attaches a single file named like `R2UppitySpinnerV3-v3.5.2-test-r1.bin`.
+2. **Connect to the periscope's WiFi.** SSID `R2Uppity`, password `Astromech` (or your configured network if you've set the droid up in station mode — see below).
 3. **Open the web UI** at `http://192.168.4.1/` (or your configured IP).
 4. **Navigate to Setup → Firmware.**
 5. **Choose File**, pick the `.bin` you downloaded, then click **Flash firmware**.
-6. The device uploads, reflashes itself, and reboots automatically. The whole thing takes about 30 seconds.
-7. Once it comes back up, the firmware version in the status bar (bottom right) will reflect the new version. Done.
+6. Wait for the upload to complete and the device to reboot. Typical upload time is ~30 seconds for a small firmware.
+7. The firmware version in the status bar (bottom right) reflects the new version once it's back up.
 
-**No re-calibration needed** for routine updates — your stored calibration, motor profile, and parameters all survive the flash. (The one exception: if release notes specifically say "re-run calibration," like when enabling Expert Mode for the first time on a 19:1.)
+**No re-calibration needed** for routine updates — stored calibration, motor profile, and parameters all survive the flash. The one exception is when release notes explicitly call for it (e.g. enabling Expert Mode for the first time on a 19:1 lifter motor).
 
-**If something goes wrong**, the device's bootloader is untouched, so you can always recover by flashing over USB.
+### Station Mode Is More Reliable Than AP Mode for OTA
+
+OTA over the droid's own access point (`R2Uppity` SSID, AP mode) shares one ESP32 core between the WiFi radio, the HTTP server, and the flash writer. Under sustained load, that contention can stall the upload mid-stream. **OTA over your home WiFi (station mode) is significantly more reliable** because the home router handles wireless link management and your laptop keeps a stable connection.
+
+To switch the droid to station mode: open the web UI, **Setup → WiFi**, uncheck "Access point mode," enter your home network's SSID and password, save and reboot. The droid's IP on your home network will appear in your router's DHCP table or in the serial boot log.
+
+### If OTA Hangs
+
+If the firmware upload page sits at "please wait" for more than a few minutes:
+
+1. **Don't power-cycle yet** — the device may still be writing.
+2. **After 5 minutes with no progress**, you can safely power-cycle. The bootloader and any successfully-flashed sectors persist; the device will boot into either the old or new firmware (whichever was last written cleanly), but it won't be bricked.
+3. **Fall back to USB flashing** to recover. The OTA endpoint and the bootloader are independent — a stalled OTA never affects USB recovery.
+4. **Optionally report the failure** with details (which firmware version was running, AP vs station mode, browser, file size) via [GitHub Issues](../../issues) so the OTA path can be hardened.
 
 ### For Builders (Producing the `.bin`)
 
@@ -146,7 +175,7 @@ If you want to build your own `.bin` from source (or are publishing a release):
 1. Open the sketch in the Arduino IDE.
 2. Make sure the right ESP32 board and partition scheme are selected.
 3. **Sketch → Export Compiled Binary.** This produces several files in the sketch folder. **Use only `R2UppitySpinnerV3.ino.bin`** for OTA — that's the application binary. Ignore `merged.bin`, `bootloader.bin`, `partitions.bin`, `.elf`, and `.map`. Those are for first-time USB flashing or debugging.
-4. Optionally rename to something version-tagged, e.g. `R2UppitySpinnerV3-v3.5.2-test.bin`, and attach to a GitHub Release.
+4. Optionally rename to something version-tagged, e.g. `R2UppitySpinnerV3-v3.5.2-test-r1.bin`, and attach to a GitHub Release.
 
 ### Test Branch Releases
 
