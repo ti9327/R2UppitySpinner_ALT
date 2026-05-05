@@ -125,9 +125,9 @@ Default serial baud rate: **9600**. Default I2C address: **0x20**.
 
 There are two ways to flash a new firmware version: **USB cable** (always works, ~1 minute) or **WiFi OTA** (no cable, but only reliable on stable WiFi).
 
-### Initial Jump from v3.5.0 → v3.5.2-test: Use USB
+### Initial Jump from v3.5.0 → v3.5.2: Use USB
 
-**Important:** if you're currently running v3.5.0 (or earlier) and want to try v3.5.2-test, **flash via USB**. The OTA endpoint in v3.5.0 has been observed to stall mid-upload when the laptop is connected directly to the droid's `R2Uppity` access point — the upload page can sit at "please wait" indefinitely with no progress feedback or timeout. After a USB flash to v3.5.2-test, future OTA updates between v3.5.2-test releases (r1 → r2 → r3) are more reliable because the upload UI in v3.5.2+ provides progress reporting and clearer error states.
+**Important:** if you're currently running v3.5.0 (or earlier) and want to upgrade to v3.5.2, **flash via USB**. The OTA endpoint in v3.5.0 has been observed to stall mid-upload when the laptop is connected directly to the droid's `R2Uppity` access point — the upload page can sit at "please wait" indefinitely with no progress feedback or timeout. After a USB flash to v3.5.2, future OTA updates between v3.5.2 and later releases are more reliable because the upload UI in v3.5.2 provides progress reporting and clearer error states.
 
 **USB flash steps:**
 
@@ -139,11 +139,11 @@ There are two ways to flash a new firmware version: **USB cable** (always works,
 
 USB flashing always works regardless of OTA endpoint state, and it's the recommended fallback any time OTA fails.
 
-### OTA Updates (v3.5.2+ → Newer v3.5.2-test Builds)
+### OTA Updates (v3.5.2 and Later)
 
-Once you're running v3.5.2-test, you can update to subsequent test releases (`-r2`, `-r3`, etc.) over WiFi without a cable.
+Once you're running v3.5.2 or later, you can update to subsequent releases over WiFi without a cable.
 
-1. **Download the `.bin` file** from the [Releases page](../../releases). Each release attaches a single file named like `R2UppitySpinnerV3-v3.5.2-test-r1.bin`.
+1. **Download the `.bin` file** from the [Releases page](../../releases). Each release attaches a single file named like `R2UppitySpinnerV3-v3.5.2.bin`.
 2. **Connect to the periscope's WiFi.** SSID `R2Uppity`, password `Astromech` (or your configured network if you've set the droid up in station mode — see below).
 3. **Open the web UI** at `http://192.168.4.1/` (or your configured IP).
 4. **Navigate to Setup → Firmware.**
@@ -175,11 +175,11 @@ If you want to build your own `.bin` from source (or are publishing a release):
 1. Open the sketch in the Arduino IDE.
 2. Make sure the right ESP32 board and partition scheme are selected.
 3. **Sketch → Export Compiled Binary.** This produces several files in the sketch folder. **Use only `R2UppitySpinnerV3.ino.bin`** for OTA — that's the application binary. Ignore `merged.bin`, `bootloader.bin`, `partitions.bin`, `.elf`, and `.map`. Those are for first-time USB flashing or debugging.
-4. Optionally rename to something version-tagged, e.g. `R2UppitySpinnerV3-v3.5.2-test-r1.bin`, and attach to a GitHub Release.
+4. Optionally rename to something version-tagged, e.g. `R2UppitySpinnerV3-v3.5.2.bin`, and attach to a GitHub Release.
 
 ### Test Branch Releases
 
-The `v3.5.2-test` branch is where in-development features live before they merge to `main`. Pre-built binaries are attached to releases tagged `v3.5.2-test-r1`, `-r2`, etc. Try them at your own risk — feedback welcome via GitHub Issues. The stable build is whatever's currently on `main`.
+In-development features land on `vX.Y.Z-test` branches before they merge to `main`. Pre-built binaries are attached to releases tagged `vX.Y.Z-test-r1`, `-r2`, etc. Try them at your own risk — feedback welcome via GitHub Issues. The stable build is whatever's currently on `main`.
 
 ---
 
